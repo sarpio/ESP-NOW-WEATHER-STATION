@@ -4,9 +4,9 @@
 #include <Arduino.h>
 #include <Preferences.h>
 
-// Po tylu ms bez pakietu dane uznajemy za nieaktualne (nadajnik wysyła co 10
-// s).
-static constexpr uint32_t DATA_TIMEOUT_MS = 60000;
+// Po tylu ms bez pakietu dane uznajemy za nieaktualne. Nadajnik wysyła co
+// 15 min - limit 35 min toleruje zgubienie jednego pakietu.
+static constexpr uint32_t DATA_TIMEOUT_MS = 35UL * 60000;
 
 // Kolory RGB565 (typ uint16_t, żeby LovyanGFX nie potraktował ich jako RGB888)
 static constexpr uint16_t C_BG = 0x0000;
