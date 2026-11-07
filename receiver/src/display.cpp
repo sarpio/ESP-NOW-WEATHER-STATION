@@ -139,6 +139,8 @@ static void saveBrightness() {
 static const char *formatAge(char *buf, size_t n, const SensorData &d) {
   if (!d.valid) {
     snprintf(buf, n, "brak");
+  } else if (d.ageUnknown) {
+    snprintf(buf, n, "przed restartem");
   } else {
     uint32_t s = (millis() - d.rxMillis) / 1000;
     if (s < 60)
@@ -152,7 +154,7 @@ static const char *formatAge(char *buf, size_t n, const SensorData &d) {
 }
 
 static bool isStale(const SensorData &d) {
-  return !d.valid || millis() - d.rxMillis > DATA_TIMEOUT_MS;
+  return !d.valid || d.ageUnknown || millis() - d.rxMillis > DATA_TIMEOUT_MS;
 }
 
 static void drawHeader(const char *title, const SensorData &d) {
@@ -377,6 +379,56 @@ static void drawSlider() {
 }
 
 // ---------------------------------------------------------------------------
+// Ekran startowy z listą kroków
+
+static constexpr int BOOT_LIST_Y = 128; // środek pierwszego wiersza
+static constexpr int BOOT_LINE_H = 30;
+static constexpr int BOOT_MAX_LINES = 6;
+static int bootLines = 0;
+
+static int bootLineY(int i) { return BOOT_LIST_Y + i * BOOT_LINE_H; }
+
+static void drawBootScreen() {
+  lcd.fillScreen(C_BG);
+  lcd.setTextDatum(textdatum_t::middle_center);
+  lcd.setFont(&fonts::FreeSansBold18pt7b);
+  lcd.setTextColor(C_TEXT, C_BG);
+  lcd.drawString("Stacja pogodowa", SCR_W / 2, 44);
+  lcd.setFont(&fonts::FreeSans9pt7b);
+  lcd.setTextColor(C_YELLOW, C_BG);
+  lcd.drawString("Uruchamianie - dotyk jeszcze nieaktywny", SCR_W / 2, 86);
+  bootLines = 0;
+}
+
+void displayBootStep(const char *text) {
+  if (bootLines >= BOOT_MAX_LINES) { // brak miejsca - przewiń listę od nowa
+    lcd.fillRect(0, bootLineY(0) - BOOT_LINE_H / 2, SCR_W,
+                 BOOT_MAX_LINES * BOOT_LINE_H, C_BG);
+    bootLines = 0;
+  }
+  int y = bootLineY(bootLines++);
+  lcd.setFont(&fonts::FreeSans9pt7b);
+  lcd.setTextDatum(textdatum_t::middle_left);
+  lcd.setTextColor(C_TEXT, C_BG);
+  lcd.drawString(text, 30, y);
+  displayBootResult("...", BootState::Pending);
+}
+
+void displayBootResult(const char *result, BootState state) {
+  if (bootLines == 0)
+    return;
+  int y = bootLineY(bootLines - 1);
+  uint16_t c = state == BootState::Ok      ? C_GREEN
+               : state == BootState::Error ? C_RED
+                                           : C_LABEL;
+  lcd.fillRect(300, y - BOOT_LINE_H / 2 + 2, SCR_W - 300, BOOT_LINE_H - 4, C_BG);
+  lcd.setFont(&fonts::FreeSans9pt7b);
+  lcd.setTextDatum(textdatum_t::middle_right);
+  lcd.setTextColor(c, C_BG);
+  lcd.drawString(result, SCR_W - 30, y);
+}
+
+// ---------------------------------------------------------------------------
 
 void displayBegin(const uint8_t mac[6]) {
   memcpy(ownMac, mac, 6);
@@ -400,6 +452,7 @@ void displayBegin(const uint8_t mac[6]) {
   sliderSpr.createSprite(SCR_W, SLIDER_H);
 
   initTouch();
+  drawBootScreen();
   fullRedraw = true;
 }
 

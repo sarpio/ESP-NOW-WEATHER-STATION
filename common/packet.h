@@ -16,7 +16,7 @@
 #include <stdint.h>
 
 // MAC nadajnika (płytka XIAO ESP32S3)
-static const uint8_t SENDER_MAC[6] = {0x80, 0xB5, 0x4E, 0xF3, 0xBC, 0xC8};
+static const uint8_t SENDER_MAC[6] = {0xB8, 0xF8, 0x62, 0xFB, 0x91, 0x7C};
 
 // Klucze JSON
 #define KEY_TEMPERATURE "Temperature"

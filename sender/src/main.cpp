@@ -29,14 +29,17 @@ static const uint32_t STARTUP_LOG_INTERVAL_MS = 30000;
 
 // Adresy I2C czujników
 static const uint8_t SHT41_ADDR = 0x44;
-static const uint8_t LPS22HH_ADDR = 0x5D;
+// LPS22HB / LPS22HH: 0x5C (SA0 = GND) lub 0x5D (SA0 = VDD) - wykrywany przy starcie
+static const uint8_t LPS_ADDR_CANDIDATES[] = {0x5C, 0x5D};
+static uint8_t lpsAddr = 0x5D;
 
 // SHT41 - pomiar wysokiej precyzji (max 8.3 ms)
 static const uint8_t SHT41_CMD_MEASURE_HIGH = 0xFD;
 
-// Rejestry LPS22HH
+// Rejestry LPS22HB / LPS22HH (mapa używanych rejestrów jest wspólna)
 static const uint8_t LPS_WHO_AM_I = 0x0F;
-static const uint8_t LPS_WHO_AM_I_VALUE = 0xB3;
+static const uint8_t LPS22HB_WHO_AM_I_VALUE = 0xB1;
+static const uint8_t LPS22HH_WHO_AM_I_VALUE = 0xB3;
 static const uint8_t LPS_CTRL_REG1 = 0x10;
 static const uint8_t LPS_CTRL_REG2 = 0x11;
 static const uint8_t LPS_STATUS = 0x27;
@@ -58,6 +61,35 @@ static uint32_t nextSendMs = 0;
 // Maksymalny czas oczekiwania na potwierdzenie wysyłki ESP-NOW
 static const uint32_t SEND_CB_TIMEOUT_MS = 200;
 static volatile bool sendDone = false;
+static volatile bool sendOk = false;
+// Ponowienia wysyłki, gdy odbiornik nie potwierdzi ramki (np. tuż po starcie
+// radio nie jest jeszcze gotowe albo odbiornik dopiero się uruchamia)
+static const int SEND_RETRIES = 10;
+static const uint32_t SEND_RETRY_DELAY_MS = 300;
+// Po zimnym starcie (np. podłączenie baterii) okno ponowień jest dłuższe -
+// zasilanie i radio mogą stabilizować się kilka sekund (~60 x 0.5 s = 30 s)
+static const int SEND_RETRIES_STARTUP = 60;
+
+// Opóźnienie przed włączeniem radia po zimnym starcie / resecie brownout -
+// daje czas na ustabilizowanie napięcia baterii (drgania styku, LDO)
+static const uint32_t POWERON_SETTLE_MS = 500;
+static const uint32_t BROWNOUT_SETTLE_MS = 3000;
+
+// Dioda użytkownika XIAO ESP32S3 (GPIO21, aktywna stanem niskim) - sygnalizuje
+// wynik wysyłki startowej, co pozwala sprawdzić działanie bez USB:
+//   1 długie mignięcie - odbiornik potwierdził ramkę
+//   3 krótkie mignięcia - brak potwierdzenia
+static const uint8_t STATUS_LED_PIN = LED_BUILTIN;
+
+static void ledBlink(int count, uint32_t onMs, uint32_t offMs) {
+  pinMode(STATUS_LED_PIN, OUTPUT);
+  for (int i = 0; i < count; i++) {
+    digitalWrite(STATUS_LED_PIN, LOW);
+    delay(onMs);
+    digitalWrite(STATUS_LED_PIN, HIGH);
+    delay(offMs);
+  }
+}
 
 static uint8_t sht41Crc(const uint8_t *data, int len) {
   uint8_t crc = 0xFF;
@@ -92,18 +124,18 @@ static bool sht41Read(float &temperature, float &humidity) {
 }
 
 static bool lpsWrite(uint8_t reg, uint8_t value) {
-  Wire.beginTransmission(LPS22HH_ADDR);
+  Wire.beginTransmission(lpsAddr);
   Wire.write(reg);
   Wire.write(value);
   return Wire.endTransmission() == 0;
 }
 
 static bool lpsRead(uint8_t reg, uint8_t *buf, uint8_t len) {
-  Wire.beginTransmission(LPS22HH_ADDR);
+  Wire.beginTransmission(lpsAddr);
   Wire.write(reg);
   if (Wire.endTransmission(false) != 0)
     return false;
-  if (Wire.requestFrom(LPS22HH_ADDR, len) != len)
+  if (Wire.requestFrom(lpsAddr, len) != len)
     return false;
   for (int i = 0; i < len; i++)
     buf[i] = Wire.read();
@@ -111,8 +143,23 @@ static bool lpsRead(uint8_t reg, uint8_t *buf, uint8_t len) {
 }
 
 static bool lpsInit() {
-  uint8_t id = 0;
-  if (!lpsRead(LPS_WHO_AM_I, &id, 1) || id != LPS_WHO_AM_I_VALUE)
+  bool found = false;
+  for (uint8_t addr : LPS_ADDR_CANDIDATES) {
+    lpsAddr = addr;
+    uint8_t id = 0;
+    if (!lpsRead(LPS_WHO_AM_I, &id, 1)) {
+      Serial.printf("LPS22: brak odpowiedzi na 0x%02X\n", addr);
+      continue;
+    }
+    Serial.printf("LPS22: adres 0x%02X, WHO_AM_I = 0x%02X\n", addr, id);
+    if (id == LPS22HB_WHO_AM_I_VALUE || id == LPS22HH_WHO_AM_I_VALUE) {
+      Serial.printf("LPS22: wykryto %s\n",
+                    id == LPS22HB_WHO_AM_I_VALUE ? "LPS22HB" : "LPS22HH");
+      found = true;
+      break;
+    }
+  }
+  if (!found)
     return false;
   // ODR = power-down (tryb one-shot), BDU = 1
   return lpsWrite(LPS_CTRL_REG1, 0x02);
@@ -177,6 +224,7 @@ static void onSent(const uint8_t *mac, esp_now_send_status_t status) {
 #endif
   Serial.printf("  -> status: %s\n",
                 status == ESP_NOW_SEND_SUCCESS ? "OK" : "FAIL");
+  sendOk = status == ESP_NOW_SEND_SUCCESS;
   sendDone = true;
 }
 
@@ -201,12 +249,29 @@ static void initFailed() {
   ESP.restart();
 }
 
-static void measureAndSend();
+static bool measureAndSend(int retries = SEND_RETRIES);
 
 void setup() {
+  // Dioda świeci od początku startu do wyniku wysyłki startowej - pozwala
+  // odróżnić brak startu (nie zapala się), zawieszenie (świeci ciągle)
+  // i resety (zapala się raz za razem)
+  bool coldStart = esp_sleep_get_wakeup_cause() != ESP_SLEEP_WAKEUP_TIMER;
+  if (coldStart) {
+    pinMode(STATUS_LED_PIN, OUTPUT);
+    digitalWrite(STATUS_LED_PIN, LOW);
+  }
   Serial.begin(115200);
   pinMode(DEEP_SLEEP_DISABLE_PIN, INPUT_PULLDOWN);
   delay(1000);
+
+  esp_reset_reason_t resetReason = esp_reset_reason();
+  Serial.printf("Powod resetu: %d%s\n", (int)resetReason,
+                resetReason == ESP_RST_BROWNOUT ? " (BROWNOUT - za niskie napiecie)" : "");
+  if (resetReason == ESP_RST_BROWNOUT)
+    delay(BROWNOUT_SETTLE_MS);
+  else if (resetReason == ESP_RST_POWERON)
+    delay(POWERON_SETTLE_MS);
+
   Serial.printf("Deep sleep: %s\n", deepSleepEnabled() ? "wlaczony" : "wylaczony (pin na 3.3V)");
 
   // XIAO ESP32S3: SDA = D4 (GPIO5), SCL = D5 (GPIO6)
@@ -214,7 +279,7 @@ void setup() {
   analogSetPinAttenuation(BATTERY_PIN, ADC_11db);
   lpsReady = lpsInit();
   if (!lpsReady)
-    Serial.println("LPS22HH nie odpowiada");
+    Serial.println("LPS22 nie odpowiada");
 
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
@@ -256,7 +321,13 @@ void setup() {
   // dalej harmonogram jak wcześniej
   if (!wokeFromSleep) {
     Serial.println("Wysylka startowa");
-    measureAndSend();
+    bool ok = measureAndSend(SEND_RETRIES_STARTUP);
+    digitalWrite(STATUS_LED_PIN, HIGH);
+    delay(500);
+    if (ok)
+      ledBlink(1, 1000, 0);
+    else
+      ledBlink(3, 150, 150);
   }
 
   if (!wokeFromSleep && STARTUP_AWAKE_MS > 0)
@@ -284,7 +355,7 @@ void loop() {
   nextSendMs = cycleStartMs + SEND_INTERVAL_MS;
 }
 
-static void measureAndSend() {
+static bool measureAndSend(int retries) {
   seq++;
 
   // Temperatura z dokładnością 0.1, wilgotność i ciśnienie jako liczby
@@ -306,7 +377,7 @@ static void measureAndSend() {
     doc[KEY_PRESSURE] = (int)lroundf(p);
   } else {
     doc[KEY_PRESSURE] = nullptr;
-    Serial.println("Blad odczytu LPS22HH");
+    Serial.println("Blad odczytu LPS22");
   }
 
   float vbat = batteryReadVoltage();
@@ -322,18 +393,29 @@ static void measureAndSend() {
   size_t len = serializeJson(doc, json, sizeof(json));
   if (len == 0 || len >= sizeof(json)) {
     Serial.println("JSON za dlugi");
-    return;
+    return false;
   }
 
   Serial.printf("Wysylam #%lu: %s\n", (unsigned long)seq, json);
 
-  sendDone = false;
-  esp_err_t res = esp_now_send(RECEIVER_MAC, (const uint8_t *)json, len);
-  if (res != ESP_OK) {
-    Serial.printf("  esp_now_send blad: %s\n", esp_err_to_name(res));
-    return;
+  for (int attempt = 1; attempt <= retries; attempt++) {
+    sendDone = false;
+    sendOk = false;
+    esp_err_t res = esp_now_send(RECEIVER_MAC, (const uint8_t *)json, len);
+    if (res != ESP_OK) {
+      Serial.printf("  esp_now_send blad: %s\n", esp_err_to_name(res));
+    } else {
+      uint32_t start = millis();
+      while (!sendDone && millis() - start < SEND_CB_TIMEOUT_MS)
+        delay(1);
+      if (sendOk)
+        return true;
+    }
+    if (attempt < retries) {
+      Serial.printf("  ponowienie %d/%d\n", attempt, retries - 1);
+      delay(SEND_RETRY_DELAY_MS);
+    }
   }
-  uint32_t start = millis();
-  while (!sendDone && millis() - start < SEND_CB_TIMEOUT_MS)
-    delay(1);
+  Serial.println("  Brak potwierdzenia od odbiornika");
+  return false;
 }

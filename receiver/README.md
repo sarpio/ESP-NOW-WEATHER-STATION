@@ -17,6 +17,9 @@ Urządzenie odbiera przez ESP-NOW pakiety JSON wysyłane przez nadajnik
   i nadajnika, kanał ESP-NOW, liczba pakietów, RSSI, czas pracy, wolna pamięć.
 - Suwak jasności podświetlenia na ekranie informacji – wartość zapisywana
   w NVS.
+- Historia odczytów z ostatniego miesiąca (2976 odczytów co 15 min) w pamięci
+  flash ESP (LittleFS), ze znacznikiem czasu z NTP – patrz
+  [Historia odczytów](#historia-odczytów).
 - Kalibracja dotyku przy pierwszym uruchomieniu (zapisywana w NVS);
   ponowną kalibrację wymusza przytrzymanie ekranu podczas ekranu startowego.
 
@@ -93,6 +96,60 @@ Wyświetlacz i kontroler dotyku dzielą jedną magistralę SPI (**SPI2 / FSPI**)
   `cfg.rgb_order = true`; obraz obrócony o 180° → `lcd.setRotation(3)`
   w `src/display.cpp`.
 
+## Historia odczytów
+
+Każdy odebrany pakiet zapisywany jest w pamięci flash ESP – w pliku
+`/history.bin` na systemie plików LittleFS (partycja `spiffs`, 3,4 MB).
+Plik jest buforem cyklicznym na **2976 odczytów (31 dni × 96)** – gdy jest
+pełny, nowy odczyt nadpisuje najstarszy. Jeden odczyt zajmuje 16 B, cały
+plik ok. 47 KB. Historia przetrwa restart, odłączenie zasilania i wgranie
+nowego programu (`upload` nie nadpisuje partycji `spiffs`; robi to tylko
+`uploadfs`).
+
+Odczyt historii przez port szeregowy (115200 baud, `pio device monitor`):
+
+- przy starcie – cała historia wypisywana jest automatycznie, jeśli monitor
+  portu jest otwarty,
+- w dowolnej chwili – wpisz `h` w monitorze portu.
+
+```
+time,boot,uptime_s,temperature_c,humidity_pct,pressure_hpa,battery_pct,battery_v,rssi_dbm
+2026-11-07 14:30:12,3,,23.5,45,1013,87,4.08,-61
+,4,35,23.4,45,1013,87,4.08,-62
+```
+
+- `time` – czas lokalny odbioru (strefa CET/CEST).
+- `boot` – numer uruchomienia odbiornika.
+- `uptime_s` – sekundy od startu; wypełniane zamiast `time`, gdy zegar nie
+  był zsynchronizowany (patrz [Czas z Wi-Fi](#czas-z-wi-fi-ntp)).
+- Puste pole oznacza brak odczytu danego czujnika.
+- Okres przechowywania: `HISTORY_DAYS` w `src/history.h`. Po zmianie plik
+  jest przebudowywany przy starcie z zachowaniem najnowszych odczytów.
+- Po restarcie ekran od razu pokazuje ostatni zapisany odczyt.
+
+## Czas z Wi-Fi (NTP)
+
+Odbiornik nie ma zegara czasu rzeczywistego, więc czas pobiera z serwera NTP
+przez Wi-Fi. Dane sieci wpisz w `src/wifi_secrets.h` (plik jest w
+`.gitignore`; wzór w `src/wifi_secrets.example.h`):
+
+```c
+#define WIFI_SSID "MojaSiec"
+#define WIFI_PASSWORD "haslo"
+```
+
+ESP-NOW działa na stałym kanale `ESPNOW_CHANNEL`, a połączenie z routerem
+przestawia radio na kanał routera. Dlatego odbiornik łączy się z Wi-Fi
+tylko na czas synchronizacji (kilka sekund), potem rozłącza się i wraca na
+kanał ESP-NOW; między synchronizacjami czas odmierza zegar ESP.
+
+- Synchronizacja przy starcie (zwykle ok. 15 s, maks. ok. 40 s, przed uruchomieniem ESP-NOW),
+  potem co 6 h; po nieudanej próbie ponowienie co 30 min.
+- Kolejne synchronizacje startują zaraz po odebraniu pakietu – do następnego
+  zostaje 15 min, więc żaden odczyt nie przepada.
+- Pusty `WIFI_SSID` wyłącza synchronizację (odczyty zapisywane bez czasu).
+- Router musi obsługiwać 2,4 GHz.
+
 ## Struktura projektu
 
 ```
@@ -105,6 +162,9 @@ ESP-NOW/
     └── src/
         ├── main.cpp        # Wi-Fi/ESP-NOW, odbiór i parsowanie JSON
         ├── display.h/.cpp  # interfejs użytkownika, dotyk, jasność
+        ├── history.h/.cpp  # historia odczytów (miesiąc) na LittleFS
+        ├── timesync.h/.cpp # Wi-Fi + NTP, znacznik czasu
+        ├── wifi_secrets.h  # SSID i hasło Wi-Fi (poza gitem)
         └── lgfx_config.h   # piny i konfiguracja LovyanGFX
 ```
 

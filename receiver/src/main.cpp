@@ -1,5 +1,7 @@
 #include "display.h"
+#include "history.h"
 #include "packet.h"
+#include "timesync.h"
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <WiFi.h>
@@ -67,6 +69,7 @@ static void onReceive(const uint8_t *mac, const uint8_t *data, int len) {
 
   portENTER_CRITICAL(&g_dataMux);
   g_data.valid = true;
+  g_data.ageUnknown = false;
   g_data.hasT = t.is<float>();
   g_data.t = g_data.hasT ? t.as<float>() : 0;
   g_data.hasH = h.is<int>();
@@ -84,8 +87,45 @@ static void onReceive(const uint8_t *mac, const uint8_t *data, int len) {
   portEXIT_CRITICAL(&g_dataMux);
 }
 
+// Po restarcie pokazuje na ekranie ostatni odczyt z historii, zamiast czekać
+// do 15 min na kolejny pakiet.
+static void restoreLastReading() {
+  HistoryEntry e;
+  if (historyCount() == 0 || !historyGet(historyCount() - 1, e))
+    return;
+  SensorData d;
+  d.valid = true;
+  d.hasT = e.flags & HF_T;
+  d.t = e.t10 / 10.0f;
+  d.hasH = e.flags & HF_H;
+  d.h = e.h;
+  d.hasP = e.flags & HF_P;
+  d.p = e.p;
+  d.hasBat = e.flags & HF_BAT;
+  d.bat = e.bat;
+  d.batV = e.batMv / 1000.0f;
+  d.hasRssi = e.flags & HF_RSSI;
+  d.rssi = e.rssi;
+  // Wiek odczytu ze znacznika czasu; millis() - rxMillis da wtedy właściwą
+  // wartość (arytmetyka modulo 2^32). Bez znacznika wiek jest nieznany.
+  time_t now = timeNow();
+  if (!(e.flags & HF_UPTIME) && e.time && now >= (time_t)e.time)
+    d.rxMillis = millis() - (uint32_t)(now - e.time) * 1000;
+  else
+    d.ageUnknown = true;
+
+  portENTER_CRITICAL(&g_dataMux);
+  g_data = d; // bez g_dataChanged - to nie nowy pakiet, nie trafia do historii
+  portEXIT_CRITICAL(&g_dataMux);
+  Serial.println("[HIST] Przywrocono ostatni odczyt");
+}
+
 void setup() {
   Serial.begin(115200);
+  // Port USB podłączony do komputera, ale bez otwartego monitora: każdy
+  // zapis czekałby domyślnie 100 ms na odbiór i start trwałby ponad minutę.
+  // Z zerowym limitem nieodebrany tekst jest od razu pomijany.
+  Serial.setTxTimeoutMs(0);
   delay(1000);
 
   WiFi.mode(WIFI_STA);
@@ -101,13 +141,30 @@ void setup() {
                 ownMac[5], ESPNOW_CHANNEL);
 
   displayBegin(ownMac);
+  timeSyncBegin(); // przed historią - wypisywane wpisy dostają strefę czasową
 
+  displayBootStep("Wczytywanie historii");
+  char buf[32];
+  if (historyBegin()) {
+    restoreLastReading();
+    snprintf(buf, sizeof(buf), "%u/%u odczytow", historyCount(), HISTORY_SIZE);
+    displayBootResult(buf, BootState::Ok);
+  } else {
+    displayBootResult("blad pamieci", BootState::Error);
+  }
+
+  displayBootStep("Uruchamianie ESP-NOW");
   if (esp_now_init() != ESP_OK) {
     Serial.println("Blad esp_now_init()");
+    displayBootResult("blad", BootState::Error);
     while (true)
       delay(1000);
   }
   esp_now_register_recv_cb(onReceive);
+  snprintf(buf, sizeof(buf), "OK (kanal %d)", ESPNOW_CHANNEL);
+  displayBootResult(buf, BootState::Ok);
+  delay(1500); // chwila na odczytanie podsumowania startu
+  Serial.printf("[START] Gotowe po %lu ms\n", (unsigned long)millis());
 }
 
 void loop() {
@@ -118,5 +175,11 @@ void loop() {
   portEXIT_CRITICAL(&g_dataMux);
 
   displayUpdate(d, changed);
+  // Zapis do flash trwa zbyt długo na callback ESP-NOW - robimy go tutaj.
+  // Pakiety przychodzą co 15 min, więc flaga nie gubi odczytów.
+  if (changed)
+    historyAdd(d);
+  timeSyncLoop(changed);
+  historyLoop();
   delay(10);
 }
