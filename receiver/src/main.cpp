@@ -174,11 +174,12 @@ void loop() {
   g_dataChanged = false;
   portEXIT_CRITICAL(&g_dataMux);
 
-  displayUpdate(d, changed);
   // Zapis do flash trwa zbyt długo na callback ESP-NOW - robimy go tutaj.
   // Pakiety przychodzą co 15 min, więc flaga nie gubi odczytów.
+  // Przed displayUpdate(), żeby wykres od razu zawierał nowy odczyt.
   if (changed)
     historyAdd(d);
+  displayUpdate(d, changed);
   timeSyncLoop(changed);
   historyLoop();
   delay(10);

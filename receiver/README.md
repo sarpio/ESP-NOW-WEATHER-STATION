@@ -13,10 +13,25 @@ Urządzenie odbiera przez ESP-NOW pakiety JSON wysyłane przez nadajnik
 - Pasek stanu: *Czekam na dane* / *Online* / *Brak danych* (brak pakietu
   przez 60 s).
 - Stopka: czas od ostatniego odczytu, licznik pakietów, RSSI.
-- Ekran informacji (dotknięcie ekranu przełącza widok): MAC odbiornika
-  i nadajnika, kanał ESP-NOW, liczba pakietów, RSSI, czas pracy, wolna pamięć.
-- Suwak jasności podświetlenia na ekranie informacji – wartość zapisywana
-  w NVS.
+- Dolny pasek z 5 przyciskami przełączającymi ekrany: *Odczyty*, *Temp.*,
+  *Wilg.*, *Cisn.*, *Info*.
+- Wykresy dobowe (ostatnie 24 h z historii) temperatury, wilgotności
+  i ciśnienia: oś czasu z siatką co 1 h (opis co 2 h, o północy data), oś
+  wartości z siatką co 1 °C / 1 % / 1 hPa, zakres dopasowany do odczytów;
+  nad wykresem min, max i bieżąca wartość. Przerwa w linii = brak pakietów.
+  Wykres wymaga zsynchronizowanego zegara (NTP).
+- Ekran informacji i stanu baterii: poziom i napięcie baterii nadajnika
+  (ze zmianą napięcia w ciągu 24 h), czas od ostatniego odczytu, MAC
+  odbiornika i nadajnika, kanał ESP-NOW, liczba pakietów, RSSI, czas pracy,
+  wolna pamięć.
+- Suwak jasności na ekranie informacji ustawia poziom bazowy podświetlenia
+  (zapisywany w NVS).
+- Automatyczna jasność z fotorezystora (przycisk *Auto* obok suwaka, stan
+  zapisywany w NVS): jasność = poziom bazowy z suwaka + korekta z czujnika
+  (ciemniej w ciemnym pomieszczeniu, jaśniej w jasnym). Suwak działa też
+  w trybie auto – przesuwa całą charakterystykę. Płynne przejścia, filtr
+  i histereza przeciw migotaniu. Napięcie z czujnika i korektę widać na
+  ekranie informacji – patrz [Fotorezystor](#fotorezystor).
 - Historia odczytów z ostatniego miesiąca (2976 odczytów co 15 min) w pamięci
   flash ESP (LittleFS), ze znacznikiem czasu z NTP – patrz
   [Historia odczytów](#historia-odczytów).
@@ -59,6 +74,23 @@ Wyświetlacz i kontroler dotyku dzielą jedną magistralę SPI (**SPI2 / FSPI**)
 | T_DIN          | GPIO 11    | Wspólne z SDI (MOSI)                          |
 | T_CS           | GPIO 4     | Chip select dotyku                            |
 | T_CLK          | GPIO 12    | Wspólne z SCK                                 |
+
+### Fotorezystor
+
+Dzielnik napięcia podłączony do **GPIO 1** (ADC1 – ADC2 nie działa przy
+włączonym Wi-Fi):
+
+```
+ 3V3 ── fotorezystor (np. GL5528) ──┬── GPIO 1
+                                    └── rezystor 10 kΩ ── GND
+```
+
+Więcej światła = wyższe napięcie = jaśniejszy ekran. W trybie *Auto* do
+poziomu bazowego z suwaka dodawana jest korekta: przy napięciu w połowie
+zakresu `LIGHT_DARK_MV`..`LIGHT_BRIGHT_MV` (300–2600 mV) zerowa, przy
+`LIGHT_DARK_MV` i poniżej ok. −48 %, przy `LIGHT_BRIGHT_MV` i powyżej
+ok. +48 % (`AUTO_SWING`). Stałe są w `src/display.cpp`; bieżące napięcie
+i korektę pokazuje wiersz *Czujnik światła* na ekranie informacji.
 
 ### Schemat zbiorczy
 

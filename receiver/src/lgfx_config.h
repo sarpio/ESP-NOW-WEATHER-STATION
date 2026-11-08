@@ -20,6 +20,15 @@
 //  T_DIN          GPIO 11
 //  T_DO           GPIO 13
 //  T_IRQ          GPIO 5
+//
+// Fotorezystor (automatyczna jasność) - dzielnik napięcia na ADC1:
+//
+//   3V3 ── fotorezystor ──┬── GPIO 1
+//                         └── rezystor 10 kΩ ── GND
+//
+// Więcej światła = mniejsza rezystancja fotorezystora = wyższe napięcie.
+// ADC2 nie działa przy włączonym Wi-Fi (synchronizacja NTP) - pin musi
+// należeć do ADC1 (GPIO 1-10).
 
 #define LGFX_USE_V1
 #include <LovyanGFX.hpp>
@@ -33,6 +42,7 @@
 #define PIN_TFT_BL 21
 #define PIN_TOUCH_CS 4
 #define PIN_TOUCH_IRQ -1 // 5
+#define PIN_LDR 1 // fotorezystor (ADC1_CH0)
 
 class LGFX : public lgfx::LGFX_Device {
   lgfx::Panel_ST7796 _panel;
