@@ -11,19 +11,28 @@ Urządzenie odbiera przez ESP-NOW pakiety JSON wysyłane przez nadajnik
 - Ekran główny z czterema kafelkami: temperatura, wilgotność, ciśnienie,
   poziom i napięcie baterii nadajnika.
 - Pasek stanu: *Czekam na dane* / *Online* / *Brak danych* (brak pakietu
-  przez 60 s).
+  przez 35 min – nadajnik wysyła co 15 min, więc zgubienie jednego pakietu
+  jest tolerowane).
 - Stopka: czas od ostatniego odczytu, licznik pakietów, RSSI.
+- Po restarcie ekran od razu pokazuje ostatni odczyt z historii (z wiekiem
+  liczonym ze znacznika czasu, a bez niego – *przed restartem*).
 - Dolny pasek z 5 przyciskami przełączającymi ekrany: *Odczyty*, *Temp.*,
   *Wilg.*, *Cisn.*, *Info*.
 - Wykresy dobowe (ostatnie 24 h z historii) temperatury, wilgotności
-  i ciśnienia: oś czasu z siatką co 1 h (opis co 2 h, o północy data), oś
-  wartości z siatką co 1 °C / 1 % / 1 hPa, zakres dopasowany do odczytów;
-  nad wykresem min, max i bieżąca wartość. Przerwa w linii = brak pakietów.
-  Wykres wymaga zsynchronizowanego zegara (NTP).
+  i ciśnienia: oś czasu kończy się na najbliższej pełnej godzinie, siatka
+  co 1 h (opis co 2 h, o północy data); oś wartości z siatką co 1 °C / 1 % /
+  1 hPa i opisami co 1/2/5/10… jednostek (tak, żeby się nie nakładały),
+  zakres w pełnych jednostkach dopasowany do odczytów (min. 2 jednostki).
+  Nad wykresem min, max i bieżąca wartość. Linia to płynna krzywa
+  (monotoniczna interpolacja sześcienna); wilgotność i ciśnienie są
+  dodatkowo wygładzane (regresja lokalna z wagami Gaussa, σ = 30 min / 1 h),
+  bo zapisywane są w pełnych jednostkach. Przerwa w linii = odstęp między
+  odczytami ponad 35 min. Wykres wymaga zsynchronizowanego zegara (NTP).
 - Ekran informacji i stanu baterii: poziom i napięcie baterii nadajnika
-  (ze zmianą napięcia w ciągu 24 h), czas od ostatniego odczytu, MAC
-  odbiornika i nadajnika, kanał ESP-NOW, liczba pakietów, RSSI, czas pracy,
-  wolna pamięć.
+  (ze zmianą napięcia w ciągu ostatnich 24 h, gdy historia obejmuje min.
+  1 h), czas od ostatniego odczytu, MAC odbiornika i nadajnika, kanał
+  ESP-NOW, napięcie czujnika światła z bieżącą korektą jasności, liczba
+  pakietów, RSSI, czas pracy, wolna pamięć.
 - Suwak jasności na ekranie informacji ustawia poziom bazowy podświetlenia
   (zapisywany w NVS).
 - Automatyczna jasność z fotorezystora (przycisk *Auto* obok suwaka, stan
@@ -36,7 +45,11 @@ Urządzenie odbiera przez ESP-NOW pakiety JSON wysyłane przez nadajnik
   flash ESP (LittleFS), ze znacznikiem czasu z NTP – patrz
   [Historia odczytów](#historia-odczytów).
 - Kalibracja dotyku przy pierwszym uruchomieniu (zapisywana w NVS);
-  ponowną kalibrację wymusza przytrzymanie ekranu podczas ekranu startowego.
+  ponowną kalibrację wymusza przytrzymanie ekranu przez pierwsze 1,5 s
+  (napis *Przytrzymaj ekran, aby skalibrować dotyk*).
+- Ekran startowy z listą kroków i ich wynikami: połączenie Wi-Fi, pobranie
+  czasu NTP (z licznikiem sekund), wczytanie historii, uruchomienie ESP-NOW.
+  Dotyk w tym czasie nie działa.
 
 ## Sprzęt
 
@@ -157,13 +170,18 @@ time,boot,uptime_s,temperature_c,humidity_pct,pressure_hpa,battery_pct,battery_v
 - Puste pole oznacza brak odczytu danego czujnika.
 - Okres przechowywania: `HISTORY_DAYS` w `src/history.h`. Po zmianie plik
   jest przebudowywany przy starcie z zachowaniem najnowszych odczytów.
+- Uszkodzony plik (lub zmiana formatu wpisu) jest tworzony od nowa.
+- Przy pierwszym starcie z LittleFS historia z dawnej wersji (zapisywana
+  w NVS) jest jednorazowo przenoszona do pliku, a NVS czyszczone.
 - Po restarcie ekran od razu pokazuje ostatni zapisany odczyt.
 
 ## Czas z Wi-Fi (NTP)
 
 Odbiornik nie ma zegara czasu rzeczywistego, więc czas pobiera z serwera NTP
-przez Wi-Fi. Dane sieci wpisz w `src/wifi_secrets.h` (plik jest w
-`.gitignore`; wzór w `src/wifi_secrets.example.h`):
+(`tempus1.gum.gov.pl`, zapasowo `pool.ntp.org` i `time.google.com`) przez
+Wi-Fi. Dane sieci wpisz w `src/wifi_secrets.h` (plik jest w `.gitignore`;
+skopiuj wzór `src/wifi_secrets.example.h`). **Bez tego pliku projekt się nie
+skompiluje.**
 
 ```c
 #define WIFI_SSID "MojaSiec"
@@ -175,8 +193,9 @@ przestawia radio na kanał routera. Dlatego odbiornik łączy się z Wi-Fi
 tylko na czas synchronizacji (kilka sekund), potem rozłącza się i wraca na
 kanał ESP-NOW; między synchronizacjami czas odmierza zegar ESP.
 
-- Synchronizacja przy starcie (zwykle ok. 15 s, maks. ok. 40 s, przed uruchomieniem ESP-NOW),
-  potem co 6 h; po nieudanej próbie ponowienie co 30 min.
+- Synchronizacja przy starcie, przed uruchomieniem ESP-NOW (maks. ok. 40 s:
+  do 15 s na połączenie z Wi-Fi i do 25 s na odpowiedź NTP, zapytanie
+  ponawiane co 7 s), potem co 6 h; po nieudanej próbie ponowienie co 30 min.
 - Kolejne synchronizacje startują zaraz po odebraniu pakietu – do następnego
   zostaje 15 min, więc żaden odczyt nie przepada.
 - Pusty `WIFI_SSID` wyłącza synchronizację (odczyty zapisywane bez czasu).
@@ -227,6 +246,7 @@ Wymagany [PlatformIO](https://platformio.org/). Biblioteki (pobierane
 automatycznie): `ArduinoJson ^7.2.0`, `LovyanGFX ^1.2.7`.
 
 ```bash
+cp src/wifi_secrets.example.h src/wifi_secrets.h   # raz, potem wpisz SSID i hasło
 pio run                  # kompilacja
 pio run -t upload        # wgranie
 pio device monitor       # monitor portu szeregowego (115200 bd)
@@ -236,6 +256,8 @@ pio device monitor       # monitor portu szeregowego (115200 bd)
 
 | Akcja                                        | Efekt                                 |
 |----------------------------------------------|---------------------------------------|
-| Przytrzymanie ekranu podczas ekranu startowego | Ponowna kalibracja dotyku           |
-| Dotknięcie ekranu                            | Przełączenie: ekran główny ↔ informacje |
-| Przeciąganie po suwaku (ekran informacji)    | Zmiana jasności podświetlenia         |
+| Przytrzymanie ekranu przy pierwszym napisie (1,5 s) | Ponowna kalibracja dotyku      |
+| Przycisk na dolnym pasku                     | Przełączenie ekranu: *Odczyty*, *Temp.*, *Wilg.*, *Cisn.*, *Info* |
+| Przeciąganie po suwaku (ekran *Info*)        | Zmiana bazowego poziomu jasności      |
+| Przycisk *Auto* (ekran *Info*)               | Włączenie/wyłączenie jasności automatycznej |
+| `h` w monitorze portu szeregowego            | Wypisanie historii (CSV)              |
