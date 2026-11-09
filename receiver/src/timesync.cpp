@@ -12,8 +12,7 @@
 #error "Brak src/wifi_secrets.h - skopiuj src/wifi_secrets.example.h i wpisz dane sieci"
 #endif
 
-// Strefa czasowa Polski (CET/CEST ze zmianą czasu)
-static const char *TZ_INFO = "CET-1CEST,M3.5.0,M10.5.0/3";
+static const char *TZ_INFO = TIME_ZONE;
 static const char *NTP_SERVERS[] = {
     "tempus1.gum.gov.pl", // Główny Urząd Miar
     "pool.ntp.org",
@@ -30,6 +29,8 @@ static constexpr uint32_t NTP_TIMEOUT_MS = 25000;     // oczekiwanie na NTP
 static constexpr uint32_t NTP_RETRY_MS = 7000;
 static constexpr uint32_t RESYNC_INTERVAL_MS = 6 * 3600000UL; // po udanej
 static constexpr uint32_t RETRY_INTERVAL_MS = 30 * 60000UL;   // po nieudanej
+// Opóźnienie startu synchronizacji po odebraniu pakietu
+static constexpr uint32_t SYNC_DELAY_MS = 3000;
 
 // Czas uznawany za poprawny (po 2024-01-01) - przed synchronizacją zegar
 // ESP liczy od 1970.
@@ -168,9 +169,19 @@ void timeSyncBegin() {
 }
 
 void timeSyncLoop(bool packetReceived) {
+  // Synchronizacja startuje chwilę po pakiecie, a nie od razu: odbiornik
+  // musi jeszcze na kanale ESP-NOW odesłać nadajnikowi czas i odebrać
+  // ewentualne ponowienia ramki.
+  static bool pending = false;
+  static uint32_t packetAt = 0;
+  if (packetReceived) {
+    pending = true;
+    packetAt = millis();
+  }
   step();
-  if (state != State::Idle || !packetReceived)
+  if (state != State::Idle || !pending || millis() - packetAt < SYNC_DELAY_MS)
     return;
+  pending = false;
   uint32_t interval = lastOk ? RESYNC_INTERVAL_MS : RETRY_INTERVAL_MS;
   if (millis() - lastAttempt >= interval)
     startSync();

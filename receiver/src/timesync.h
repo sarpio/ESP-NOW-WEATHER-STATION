@@ -14,7 +14,8 @@
 void timeSyncBegin();
 
 // Wywoływać cyklicznie w loop(). packetReceived = właśnie przyszedł pakiet -
-// kolejna synchronizacja startuje tylko wtedy, bo do następnego pakietu
+// kolejna synchronizacja startuje tylko wtedy (z kilkusekundowym
+// opóźnieniem na odesłanie czasu nadajnikowi), bo do następnego pakietu
 // jest najwięcej czasu i nic nie zostanie przegapione.
 void timeSyncLoop(bool packetReceived);
 

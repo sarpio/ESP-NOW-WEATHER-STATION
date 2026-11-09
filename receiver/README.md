@@ -196,8 +196,13 @@ kanał ESP-NOW; między synchronizacjami czas odmierza zegar ESP.
 - Synchronizacja przy starcie, przed uruchomieniem ESP-NOW (maks. ok. 40 s:
   do 15 s na połączenie z Wi-Fi i do 25 s na odpowiedź NTP, zapytanie
   ponawiane co 7 s), potem co 6 h; po nieudanej próbie ponowienie co 30 min.
-- Kolejne synchronizacje startują zaraz po odebraniu pakietu – do następnego
-  zostaje 15 min, więc żaden odczyt nie przepada.
+- Kolejne synchronizacje startują 3 s po odebraniu pakietu (`SYNC_DELAY_MS`) –
+  do następnego zostaje 15 min, więc żaden odczyt nie przepada.
+- Zegar nadajnika: w odpowiedzi na każdy pakiet odbiornik od razu (jeszcze
+  w callbacku odbioru, na kanale ESP-NOW) odsyła nadajnikowi bieżący czas
+  `{"Time":<s>,"Us":<µs>}`. Nadajnik ustawia według niego zegar i wysyła
+  odczyty o pełnych kwadransach (`:00`, `:15`, `:30`, `:45`). Bez czasu z NTP
+  odbiornik nie odpowiada, a nadajnik wysyła co 15 min od startu.
 - Pusty `WIFI_SSID` wyłącza synchronizację (odczyty zapisywane bez czasu).
 - Router musi obsługiwać 2,4 GHz.
 
@@ -206,12 +211,12 @@ kanał ESP-NOW; między synchronizacjami czas odmierza zegar ESP.
 ```
 ESP-NOW/
 ├── common/
-│   └── packet.h        # format ramki, kanał, MAC nadajnika, klucze JSON
+│   └── packet.h        # format ramek, kanał, MAC nadajnika, klucze JSON, strefa czasowa
 ├── sender/             # projekt nadajnika
 └── receiver/           # ten projekt
     ├── platformio.ini
     └── src/
-        ├── main.cpp        # Wi-Fi/ESP-NOW, odbiór i parsowanie JSON
+        ├── main.cpp        # Wi-Fi/ESP-NOW, odbiór i parsowanie JSON, odsyłanie czasu
         ├── display.h/.cpp  # interfejs użytkownika, dotyk, jasność
         ├── history.h/.cpp  # historia odczytów (miesiąc) na LittleFS
         ├── timesync.h/.cpp # Wi-Fi + NTP, znacznik czasu
@@ -230,12 +235,20 @@ ESP-NOW/
 Pole ma wartość `null`, gdy odczyt danego czujnika się nie powiódł – na ekranie
 wyświetlane jest wtedy `---`.
 
+Na każdą ramkę odbiornik odpowiada nadajnikowi ramką z bieżącym czasem (czas
+Unix UTC w sekundach i część mikrosekundowa), o ile ma czas z NTP:
+
+```json
+{"Time":1762700400,"Us":123456}
+```
+
 ## Konfiguracja
 
 W pliku `../common/packet.h`:
 
 - `SENDER_MAC` – adres MAC nadajnika (ramki od innych urządzeń są pomijane),
-- `ESPNOW_CHANNEL` – kanał Wi-Fi (musi być taki sam w nadajniku i odbiorniku).
+- `ESPNOW_CHANNEL` – kanał Wi-Fi (musi być taki sam w nadajniku i odbiorniku),
+- `TIME_ZONE` – strefa czasowa (POSIX TZ) używana przez obie płytki.
 
 MAC odbiornika jest wypisywany na porcie szeregowym przy starcie oraz
 widoczny na ekranie informacji.

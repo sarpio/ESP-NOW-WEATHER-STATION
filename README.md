@@ -4,17 +4,22 @@ Bezprzewodowa stacja pogodowa złożona z dwóch urządzeń ESP32 komunikującyc
 przez **ESP-NOW** (bez routera i sieci Wi-Fi):
 
 - **Nadajnik** (`sender/`) – zasilana bateryjnie płytka **XIAO ESP32S3**
-  z czujnikami SHT41 (temperatura, wilgotność) i LPS22HH (ciśnienie). Co 15 min
-  mierzy dane i napięcie baterii, wysyła je i przechodzi w deep sleep.
+  z czujnikami SHT41 (temperatura, wilgotność) i LPS22HH (ciśnienie). O pełnej
+  godzinie oraz +15, +30 i +45 min mierzy dane i napięcie baterii, wysyła je
+  i przechodzi w deep sleep. Zegar synchronizuje z odbiornikiem przy każdej wysyłce.
 - **Odbiornik** (`receiver/`) – **ESP32-S3 N16R8** z dotykowym wyświetlaczem
   4.0" TFT (ST7796S + XPT2046). Odbiera pakiety i prezentuje odczyty na ekranie.
+  W odpowiedzi na każdy pakiet odsyła nadajnikowi czas (zegar odbiornika jest
+  synchronizowany z serwerem NTP przez Wi-Fi).
 
 ```
 ┌───────────────────────┐        ESP-NOW         ┌────────────────────────┐
 │  Nadajnik             │   (kanał Wi-Fi 1,      │  Odbiornik             │
 │  XIAO ESP32S3         │    JSON ≤ 250 B)       │  ESP32-S3 N16R8        │
 │  SHT41 + LPS22HH      │ ─────────────────────► │  TFT 4.0" 480×320      │
-│  bateria Li-Po        │      co 15 min         │  dotyk XPT2046         │
+│  bateria Li-Po        │  :00 :15 :30 :45       │  dotyk XPT2046         │
+│                       │ ◄───────────────────── │  zegar z NTP           │
+│                       │   odpowiedź: czas      │                        │
 └───────────────────────┘                        └────────────────────────┘
 ```
 
@@ -23,7 +28,7 @@ przez **ESP-NOW** (bez routera i sieci Wi-Fi):
 ```
 ESP-NOW/
 ├── common/
-│   └── packet.h     # wspólne: format ramki, kanał ESP-NOW, MAC nadajnika, klucze JSON
+│   └── packet.h     # wspólne: format ramek (dane, czas), kanał ESP-NOW, MAC nadajnika, klucze JSON, strefa czasowa
 ├── sender/          # projekt PlatformIO nadajnika     → sender/README.md
 └── receiver/        # projekt PlatformIO odbiornika    → receiver/README.md
 ```
@@ -52,6 +57,13 @@ katalogach:
 | `BatteryVoltage` | V         | napięcie baterii                  |
 
 Pole ma wartość `null`, gdy odczyt danego czujnika się nie powiódł.
+
+W odpowiedzi odbiornik (o ile ma czas z NTP) od razu odsyła nadajnikowi
+bieżący czas – czas Unix (UTC) w sekundach i część mikrosekundową:
+
+```json
+{"Time":1762700400,"Us":123456}
+```
 
 ## Konfiguracja par urządzeń
 

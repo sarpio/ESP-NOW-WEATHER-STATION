@@ -7,11 +7,30 @@
 #include <WiFi.h>
 #include <esp_now.h>
 #include <esp_wifi.h>
+#include <sys/time.h>
 
 // Dane współdzielone między callbackiem ESP-NOW (task Wi-Fi) a loop()
 static SensorData g_data;
 static bool g_dataChanged = false;
 static portMUX_TYPE g_dataMux = portMUX_INITIALIZER_UNLOCKED;
+
+// Odsyła nadajnikowi bieżący czas - nadajnik ustawia według niego swój
+// zegar i planuje wysyłki na pełne kwadranse. Wywoływane z callbacku
+// odbioru, żeby odpowiedź wyszła od razu (nadajnik czeka na nią krótko,
+// a loop() może być zajęta zapisem historii lub odświeżaniem ekranu).
+static void sendTimeReply() {
+  if (!timeIsValid())
+    return;
+  struct timeval tv;
+  gettimeofday(&tv, nullptr);
+  char buf[64];
+  int n = snprintf(buf, sizeof(buf), "{\"%s\":%lld,\"%s\":%ld}", KEY_TIME,
+                   (long long)tv.tv_sec, KEY_TIME_US, (long)tv.tv_usec);
+  esp_err_t res = esp_now_send(SENDER_MAC, (const uint8_t *)buf, n);
+  if (res != ESP_OK)
+    Serial.printf("[CZAS] Blad wysylki czasu do nadajnika: %s\n",
+                  esp_err_to_name(res));
+}
 
 #if ESP_ARDUINO_VERSION_MAJOR >= 3
 static void onReceive(const esp_now_recv_info_t *info, const uint8_t *data,
@@ -32,6 +51,7 @@ static void onReceive(const uint8_t *mac, const uint8_t *data, int len) {
   }
   if (len <= 0 || len > PACKET_MAX_LEN)
     return;
+  sendTimeReply();
 
   JsonDocument doc;
   DeserializationError err = deserializeJson(doc, data, len);
@@ -161,6 +181,14 @@ void setup() {
       delay(1000);
   }
   esp_now_register_recv_cb(onReceive);
+  // Nadajnik jako peer - odbiornik odsyła mu czas
+  esp_now_peer_info_t peer = {};
+  memcpy(peer.peer_addr, SENDER_MAC, 6);
+  peer.channel = ESPNOW_CHANNEL;
+  peer.encrypt = false;
+  peer.ifidx = WIFI_IF_STA;
+  if (esp_now_add_peer(&peer) != ESP_OK)
+    Serial.println("Blad esp_now_add_peer() - nadajnik nie dostanie czasu");
   snprintf(buf, sizeof(buf), "OK (kanal %d)", ESPNOW_CHANNEL);
   displayBootResult(buf, BootState::Ok);
   delay(1500); // chwila na odczytanie podsumowania startu

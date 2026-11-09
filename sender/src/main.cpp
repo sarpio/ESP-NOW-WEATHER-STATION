@@ -5,15 +5,20 @@
 #include <Wire.h>
 #include <esp_now.h>
 #include <esp_wifi.h>
+#include <sys/time.h>
 
 // MAC odbiornika (płytka ESP32-S3 N16R8)
 static const uint8_t RECEIVER_MAC[6] = {0x80, 0xB5, 0x4E, 0xFA, 0xC3, 0x14};
 
+// Okres wysyłek. Gdy zegar jest zsynchronizowany (czas odsyła odbiornik
+// w odpowiedzi na każdą ramkę), wysyłki są wyrównane do zegara: o pełnej
+// godzinie oraz +15, +30 i +45 min. Bez zegara (np. odbiornik nie ma czasu
+// z NTP) - co SEND_INTERVAL_MS licząc od poprzedniej wysyłki.
 static const uint32_t SEND_INTERVAL_MS = 15 * 60000;
 
 // Zworka trybu pracy (wewnętrzny pull-down):
-//   pin niepodłączony / GND - po wysyłce deep sleep na SEND_INTERVAL_MS
-//   pin na 3.3V             - płytka cały czas pracuje i wysyła co SEND_INTERVAL_MS
+//   pin niepodłączony / GND - między wysyłkami deep sleep
+//   pin na 3.3V             - płytka cały czas pracuje
 static const uint8_t DEEP_SLEEP_DISABLE_PIN = D3; // GPIO4
 
 static bool deepSleepEnabled() {
@@ -55,8 +60,100 @@ static const float BATTERY_MIN_VALID_V = 2.5f;
 RTC_DATA_ATTR static uint32_t seq = 0;
 static bool lpsReady = false;
 
-// Zaplanowany czas (millis) najbliższej wysyłki
+// Najbliższa wysyłka: czas zegara (Unix, ms) albo - gdy zegar nie jest
+// zsynchronizowany (nextSlotMs == 0) - millis()
+static int64_t nextSlotMs = 0;
 static uint32_t nextSendMs = 0;
+// Do tej chwili (millis) płytka nie usypia - okno czuwania po zimnym starcie
+static uint32_t awakeUntilMs = 0;
+
+// Synchronizacja zegara z odbiornikiem
+// Ile wcześniej budzić się przed wysyłką - start płytki i radia trwa ~1.3 s,
+// resztę program odczekuje, by pomiar wyszedł o pełnym kwadransie
+static const uint32_t WAKE_ADVANCE_MS = 2000;
+// Maksymalny czas oczekiwania na czas od odbiornika po potwierdzeniu ramki
+static const uint32_t TIME_REPLY_TIMEOUT_MS = 300;
+// Czas uznawany za poprawny (po 2024-01-01) - po podaniu zasilania zegar
+// ESP liczy od 1970
+static const time_t TIME_VALID_AFTER = 1704067200;
+// Zegar RTC odmierzający deep sleep (wewnętrzny generator RC) potrafi się
+// mylić o ułamek procenta - kilka sekund na 15 min. Błąd jest mierzony przy
+// każdej synchronizacji i korygowany (czas snu i zegar po wybudzeniu).
+// rtcDrift = (czas rzeczywisty - czas wg RTC) / czas wg RTC
+RTC_DATA_ATTR static float rtcDrift = 0;
+RTC_DATA_ATTR static bool rtcDriftKnown = false;
+static const float RTC_DRIFT_MAX = 0.05f;
+// Ostatni sen (wg RTC) i suma snu od ostatniej synchronizacji
+RTC_DATA_ATTR static int64_t lastSleepMs = 0;
+RTC_DATA_ATTR static int64_t unsyncedSleepMs = 0;
+
+// Czas z odbiornika - zapisywany w callbacku, przetwarzany w measureAndSend()
+static portMUX_TYPE timeMux = portMUX_INITIALIZER_UNLOCKED;
+static volatile bool timeReplyReceived = false;
+static int64_t timeReplyUs = 0;
+
+static bool clockValid() { return time(nullptr) > TIME_VALID_AFTER; }
+
+static int64_t clockUs() {
+  struct timeval tv;
+  gettimeofday(&tv, nullptr);
+  return (int64_t)tv.tv_sec * 1000000LL + tv.tv_usec;
+}
+
+static int64_t clockMs() { return clockUs() / 1000; }
+
+static void clockSetUs(int64_t us) {
+  struct timeval tv;
+  tv.tv_sec = (time_t)(us / 1000000LL);
+  tv.tv_usec = (suseconds_t)(us % 1000000LL);
+  settimeofday(&tv, nullptr);
+}
+
+// Formatuje czas lokalny (ms od 1970) jako "RRRR-MM-DD GG:MM:SS"
+static const char *formatClock(int64_t ms) {
+  static char buf[24];
+  time_t t = (time_t)(ms / 1000);
+  struct tm tm;
+  localtime_r(&t, &tm);
+  strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tm);
+  return buf;
+}
+
+// Pierwszy pełny kwadrans po chwili t
+static int64_t slotAfter(int64_t t) {
+  const int64_t slot = SEND_INTERVAL_MS;
+  return (t / slot + 1) * slot;
+}
+
+// Kwadrans najbliższy chwili t (po wybudzeniu - zegar może się nieco mylić)
+static int64_t slotNearest(int64_t t) {
+  const int64_t slot = SEND_INTERVAL_MS;
+  return (t + slot / 2) / slot * slot;
+}
+
+// Ustawia zegar według czasu od odbiornika i aktualizuje oszacowanie błędu RTC
+static void applyTimeReply(int64_t remoteUs) {
+  bool wasValid = clockValid();
+  int64_t offsetMs = (remoteUs - clockUs()) / 1000;
+  clockSetUs(remoteUs);
+  // Błąd RTC da się zmierzyć, gdy od ostatniej synchronizacji płytka spała
+  // dość długo. Każdy sen był już skorygowany o rtcDrift, więc offset to
+  // błąd resztkowy.
+  if (wasValid && unsyncedSleepMs >= 60000 && llabs(offsetMs) < 120000) {
+    float measured = rtcDrift + (float)offsetMs / (float)unsyncedSleepMs;
+    measured = constrain(measured, -RTC_DRIFT_MAX, RTC_DRIFT_MAX);
+    rtcDrift = rtcDriftKnown ? (rtcDrift + measured) / 2 : measured;
+    rtcDriftKnown = true;
+  }
+  unsyncedSleepMs = 0;
+  if (wasValid)
+    Serial.printf("  Czas z odbiornika: %s (korekta %+lld ms, blad RTC %+.3f%%)\n",
+                  formatClock(remoteUs / 1000), (long long)offsetMs,
+                  rtcDrift * 100.0f);
+  else
+    Serial.printf("  Czas z odbiornika: %s (pierwsza synchronizacja)\n",
+                  formatClock(remoteUs / 1000));
+}
 
 // Maksymalny czas oczekiwania na potwierdzenie wysyłki ESP-NOW
 static const uint32_t SEND_CB_TIMEOUT_MS = 200;
@@ -228,24 +325,66 @@ static void onSent(const uint8_t *mac, esp_now_send_status_t status) {
   sendDone = true;
 }
 
-// cycleStartMs - moment (millis) rozpoczęcia bieżącego cyklu pomiarowego
-static void goToSleep(uint32_t cycleStartMs) {
+// Odpowiedź odbiornika z bieżącym czasem: {"Time":<s>,"Us":<us>}
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+static void onReceive(const esp_now_recv_info_t *info, const uint8_t *data,
+                      int len) {
+  const uint8_t *mac = info->src_addr;
+#else
+static void onReceive(const uint8_t *mac, const uint8_t *data, int len) {
+#endif
+  if (memcmp(mac, RECEIVER_MAC, 6) != 0 || len <= 0 || len > PACKET_MAX_LEN)
+    return;
+  JsonDocument doc;
+  if (deserializeJson(doc, data, len))
+    return;
+  JsonVariant t = doc[KEY_TIME];
+  if (!t.is<long long>())
+    return;
+  int64_t us = (int64_t)t.as<long long>() * 1000000LL + doc[KEY_TIME_US].as<long>();
+  if (us / 1000000LL <= TIME_VALID_AFTER)
+    return;
+  portENTER_CRITICAL(&timeMux);
+  timeReplyUs = us;
+  timeReplyReceived = true;
+  portEXIT_CRITICAL(&timeMux);
+}
+
+// Deep sleep na realMs (czas rzeczywisty) - czas snu wg RTC jest korygowany
+// o zmierzony błąd zegara RTC
+static void sleepFor(int64_t realMs) {
+  if (realMs < 1000)
+    realMs = 1000;
+  int64_t rtcMs = (int64_t)(realMs / (1.0f + rtcDrift));
+  if (clockValid())
+    Serial.printf("Deep sleep do %s\n", formatClock(clockMs() + realMs));
+  else
+    Serial.printf("Deep sleep na %lld s\n", (long long)(realMs / 1000));
+  lastSleepMs = rtcMs;
+  unsyncedSleepMs += rtcMs;
   Serial.flush();
   esp_now_deinit();
   WiFi.mode(WIFI_OFF);
-  // Odejmujemy czas pracy, aby okres między wysyłkami wynosił ~SEND_INTERVAL_MS
-  uint32_t awake = millis() - cycleStartMs;
-  uint32_t sleepMs = awake < SEND_INTERVAL_MS ? SEND_INTERVAL_MS - awake : 1000;
-  esp_sleep_enable_timer_wakeup((uint64_t)sleepMs * 1000ULL);
+  esp_sleep_enable_timer_wakeup((uint64_t)rtcMs * 1000ULL);
   esp_deep_sleep_start();
 }
 
-// Błąd inicjalizacji radia - ponowna próba po SEND_INTERVAL_MS
+// Czas (ms) do najbliższej wysyłki według harmonogramu
+static int64_t msUntilNextSend() {
+  if (nextSlotMs)
+    return nextSlotMs - clockMs();
+  return (int32_t)(nextSendMs - millis());
+}
+
+// Błąd inicjalizacji radia - ponowna próba przy najbliższym kwadransie
+// (bez zegara - po SEND_INTERVAL_MS)
 static void initFailed() {
+  int64_t waitMs = clockValid() ? slotAfter(clockMs()) - clockMs() - WAKE_ADVANCE_MS
+                                : SEND_INTERVAL_MS;
   if (deepSleepEnabled())
-    goToSleep(0);
+    sleepFor(waitMs);
   Serial.flush();
-  delay(SEND_INTERVAL_MS);
+  delay(waitMs > 0 ? (uint32_t)waitMs : 1000);
   ESP.restart();
 }
 
@@ -260,6 +399,12 @@ void setup() {
     pinMode(STATUS_LED_PIN, OUTPUT);
     digitalWrite(STATUS_LED_PIN, LOW);
   }
+  // Zegar przetrwał deep sleep, ale czas snu odmierzał niedokładny RTC -
+  // korekta o zmierzony błąd
+  if (!coldStart && clockValid() && lastSleepMs > 0)
+    clockSetUs(clockUs() + (int64_t)(lastSleepMs * rtcDrift) * 1000LL);
+  setenv("TZ", TIME_ZONE, 1);
+  tzset();
   Serial.begin(115200);
   pinMode(DEEP_SLEEP_DISABLE_PIN, INPUT_PULLDOWN);
   delay(1000);
@@ -302,6 +447,7 @@ void setup() {
     initFailed();
   }
   esp_now_register_send_cb(onSent);
+  esp_now_register_recv_cb(onReceive);
 
   esp_now_peer_info_t peer = {};
   memcpy(peer.peer_addr, RECEIVER_MAC, 6);
@@ -313,12 +459,11 @@ void setup() {
     initFailed();
   }
 
-  // Po wybudzeniu z deep sleep wysyłamy od razu, po zimnym starcie czekamy
-  bool wokeFromSleep = esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER;
-  nextSendMs = wokeFromSleep ? 0 : STARTUP_AWAKE_MS;
+  bool wokeFromSleep = !coldStart;
+  awakeUntilMs = wokeFromSleep ? 0 : STARTUP_AWAKE_MS;
 
-  // Po zimnym starcie jednorazowa wysyłka od razu (bez deep sleep po niej),
-  // dalej harmonogram jak wcześniej
+  // Po zimnym starcie jednorazowa wysyłka od razu (bez deep sleep po niej) -
+  // przy okazji synchronizuje zegar, dalej wysyłki o pełnych kwadransach
   if (!wokeFromSleep) {
     Serial.println("Wysylka startowa");
     bool ok = measureAndSend(SEND_RETRIES_STARTUP);
@@ -330,33 +475,70 @@ void setup() {
       ledBlink(3, 150, 150);
   }
 
-  if (!wokeFromSleep && STARTUP_AWAKE_MS > 0)
-    Serial.printf("Tryb aktywny - kolejna wysylka za %lu s\n",
+  if (clockValid()) {
+    // Po wybudzeniu: kwadrans, na który ustawiono budzik (zwykle kilka
+    // sekund przed nim - loop() odczeka resztę). Po zimnym starcie: najbliższy.
+    int64_t now = clockMs();
+    nextSlotMs = wokeFromSleep ? slotNearest(now) : slotAfter(now);
+  } else {
+    // Bez zegara - harmonogram względny jak dawniej
+    nextSendMs = wokeFromSleep ? 0 : STARTUP_AWAKE_MS;
+  }
+
+  if (!wokeFromSleep && STARTUP_AWAKE_MS > 0) {
+    Serial.printf("Tryb aktywny przez %lu s\n",
                   (unsigned long)(STARTUP_AWAKE_MS / 1000));
+    if (nextSlotMs)
+      Serial.printf("Kolejna wysylka: %s\n", formatClock(nextSlotMs));
+    else
+      Serial.println("Brak czasu z odbiornika - wysylki co 15 min od startu");
+  }
+}
+
+// Ustala termin kolejnej wysyłki po wysyłce zaplanowanej na servedSlotMs
+// (lub servedSendMs przy harmonogramie bez zegara)
+static void scheduleNext(int64_t servedSlotMs, uint32_t servedSendMs) {
+  if (clockValid()) {
+    int64_t now = clockMs();
+    // Od obsłużonego kwadransa, a nie od bieżącej chwili - po korekcie zegara
+    // (np. cofnięciu o kilka sekund) ten sam kwadrans nie wypadnie drugi raz
+    int64_t next = servedSlotMs ? servedSlotMs + SEND_INTERVAL_MS : slotAfter(now);
+    while (next <= now)
+      next += SEND_INTERVAL_MS;
+    nextSlotMs = next;
+    Serial.printf("Kolejna wysylka: %s\n", formatClock(nextSlotMs));
+  } else {
+    nextSlotMs = 0;
+    nextSendMs = servedSendMs + SEND_INTERVAL_MS;
+  }
 }
 
 void loop() {
-  int32_t remaining = (int32_t)(nextSendMs - millis());
+  int64_t remaining = msUntilNextSend();
   if (remaining > 0) {
+    bool awakeWindow = (int32_t)(awakeUntilMs - millis()) > 0;
+    // Uśpienie, gdy do wysyłki zostało więcej niż czas startu po wybudzeniu
+    if (deepSleepEnabled() && !awakeWindow && remaining > WAKE_ADVANCE_MS + 1000)
+      sleepFor(remaining - (nextSlotMs ? WAKE_ADVANCE_MS : 0));
     static uint32_t lastLogMs = 0;
-    if (nextSendMs == STARTUP_AWAKE_MS &&
-        millis() - lastLogMs >= STARTUP_LOG_INTERVAL_MS) {
+    if (awakeWindow && millis() - lastLogMs >= STARTUP_LOG_INTERVAL_MS) {
       lastLogMs = millis();
       Serial.printf("Wysylka za %ld s\n", (long)(remaining / 1000));
     }
-    delay(10);
+    delay(remaining > 10 ? 10 : (uint32_t)remaining);
     return;
   }
 
-  uint32_t cycleStartMs = nextSendMs;
+  int64_t servedSlotMs = nextSlotMs;
+  uint32_t servedSendMs = nextSendMs;
   measureAndSend();
-  if (deepSleepEnabled())
-    goToSleep(cycleStartMs);
-  nextSendMs = cycleStartMs + SEND_INTERVAL_MS;
+  scheduleNext(servedSlotMs, servedSendMs);
 }
 
 static bool measureAndSend(int retries) {
   seq++;
+  if (clockValid())
+    Serial.printf("[%s] ", formatClock(clockMs()));
 
   // Temperatura z dokładnością 0.1, wilgotność i ciśnienie jako liczby
   // całkowite
@@ -398,6 +580,7 @@ static bool measureAndSend(int retries) {
 
   Serial.printf("Wysylam #%lu: %s\n", (unsigned long)seq, json);
 
+  timeReplyReceived = false;
   for (int attempt = 1; attempt <= retries; attempt++) {
     sendDone = false;
     sendOk = false;
@@ -408,8 +591,21 @@ static bool measureAndSend(int retries) {
       uint32_t start = millis();
       while (!sendDone && millis() - start < SEND_CB_TIMEOUT_MS)
         delay(1);
-      if (sendOk)
+      if (sendOk) {
+        // Odbiornik odsyła czas zaraz po odebraniu ramki
+        start = millis();
+        while (!timeReplyReceived && millis() - start < TIME_REPLY_TIMEOUT_MS)
+          delay(1);
+        if (timeReplyReceived) {
+          portENTER_CRITICAL(&timeMux);
+          int64_t us = timeReplyUs;
+          portEXIT_CRITICAL(&timeMux);
+          applyTimeReply(us);
+        } else {
+          Serial.println("  Brak czasu od odbiornika");
+        }
         return true;
+      }
     }
     if (attempt < retries) {
       Serial.printf("  ponowienie %d/%d\n", attempt, retries - 1);
