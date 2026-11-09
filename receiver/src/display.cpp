@@ -19,9 +19,9 @@ static constexpr uint16_t C_HEADER = 0x10A3;
 static constexpr uint16_t C_TILE = 0x1905;
 static constexpr uint16_t C_LABEL = 0x94D4;
 static constexpr uint16_t C_TEXT = 0xFFFF;
-static constexpr uint16_t C_TEMP = 0xFC65;
-static constexpr uint16_t C_HUM = 0x555F;
-static constexpr uint16_t C_PRESS = 0xB47F;
+static constexpr uint16_t C_TEMP = 0x3C7F;  // niebieski  #3A8DFF
+static constexpr uint16_t C_HUM = 0xB31F;   // fioletowy #B060FF
+static constexpr uint16_t C_PRESS = 0x468C; // zielony   #40D060
 static constexpr uint16_t C_GREEN = 0x56EC;
 static constexpr uint16_t C_YELLOW = 0xFE46;
 static constexpr uint16_t C_RED = 0xF227;
@@ -522,12 +522,14 @@ struct MetricInfo {
   // Wilgotność i ciśnienie są zapisywane w pełnych jednostkach - bez
   // wygładzania powolna zmiana wygląda jak schodki co 1 %/1 hPa.
   uint16_t smoothS;
+  // Kolor krzywej dla wartości ujemnych, 0 = jak dla dodatnich (m.color)
+  uint16_t negColor;
 };
 
 static const MetricInfo METRICS[3] = {
-    {"Temperatura - 24 h", "C", true, 1, C_TEMP, HF_T, 0},
-    {"Wilgotnosc - 24 h", "%", false, 0, C_HUM, HF_H, 30 * 60},
-    {"Cisnienie - 24 h", "hPa", false, 0, C_PRESS, HF_P, 60 * 60},
+    {"Temperatura - 24 h", "C", true, 1, C_TEMP, HF_T, 0, C_RED},
+    {"Wilgotnosc - 24 h", "%", false, 0, C_HUM, HF_H, 30 * 60, 0},
+    {"Cisnienie - 24 h", "hPa", false, 0, C_PRESS, HF_P, 60 * 60, 0},
 };
 
 struct ChartPoint {
@@ -765,16 +767,23 @@ static void drawChart(const MetricInfo &m) {
     px[i] = PLOT_L + (int32_t)(chartPts[i].t - start) * pxPerSec;
     py[i] = PLOT_B - (chartFit[i] - lo) * pxPerUnit;
   }
+  // Kolor zależny od znaku wartości: punkt poniżej linii zera (większe y)
+  // oznacza wartość ujemną
+  const float zeroY = PLOT_B + lo * pxPerUnit;
+  auto colorAt = [&](float y) {
+    return m.negColor && y > zeroY ? m.negColor : m.color;
+  };
   for (int seg0 = 0; seg0 < n;) {
     int seg1 = seg0;
     while (seg1 + 1 < n && linked(seg1))
       seg1++;
     const int cnt = seg1 - seg0 + 1;
     if (cnt == 1) { // pojedynczy odczyt
-      s.fillCircle(lroundf(px[seg0]), lroundf(py[seg0]), 2, m.color);
+      s.fillCircle(lroundf(px[seg0]), lroundf(py[seg0]), 2, colorAt(py[seg0]));
     } else {
       curveSlopes(px + seg0, py + seg0, cnt, slope + seg0);
       int x0 = lroundf(px[seg0]), y0 = lroundf(py[seg0]);
+      float yPrev = py[seg0];
       for (int i = seg0; i < seg1; i++) {
         const float h = px[i + 1] - px[i];
         const int steps = std::max(1, (int)(h / 2)); // odcinki co ok. 2 px
@@ -785,15 +794,17 @@ static void drawChart(const MetricInfo &m) {
                           (-2 * u3 + 3 * u2) * py[i + 1] +
                           (u3 - u2) * h * slope[i + 1];
           const int x1 = lroundf(px[i] + u * h), y1 = lroundf(y);
-          s.drawWideLine(x0, y0, x1, y1, 1.0f, m.color);
-          x0 = x1, y0 = y1;
+          // Kolor wg środka odcinka (odcinki mają ok. 2 px, więc zmiana
+          // koloru wypada praktycznie dokładnie na linii zera)
+          s.drawWideLine(x0, y0, x1, y1, 1.0f, colorAt((yPrev + y) / 2));
+          x0 = x1, y0 = y1, yPrev = y;
         }
       }
     }
     seg0 = seg1 + 1;
   }
   const int lx = lroundf(px[n - 1]), ly = lroundf(py[n - 1]);
-  s.fillCircle(lx, ly, 4, m.color);
+  s.fillCircle(lx, ly, 4, colorAt(py[n - 1]));
   s.drawCircle(lx, ly, 4, C_TEXT);
 
   s.pushSprite(0, HEADER_H);
