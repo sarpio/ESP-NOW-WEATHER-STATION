@@ -14,14 +14,19 @@
 
 // Strefa czasowa Polski (CET/CEST ze zmianą czasu)
 static const char *TZ_INFO = "CET-1CEST,M3.5.0,M10.5.0/3";
-static const char *NTP_SERVER1 = "tempus1.gum.gov.pl"; // Główny Urząd Miar
-static const char *NTP_SERVER2 = "pool.ntp.org";
-static const char *NTP_SERVER3 = "time.google.com";
+static const char *NTP_SERVERS[] = {
+    "tempus1.gum.gov.pl", // Główny Urząd Miar
+    "pool.ntp.org",
+    "time.google.com",
+};
+static constexpr uint8_t NTP_SERVER_COUNT = sizeof(NTP_SERVERS) / sizeof(NTP_SERVERS[0]);
 
 static constexpr uint32_t CONNECT_TIMEOUT_MS = 15000; // łączenie z Wi-Fi
 static constexpr uint32_t NTP_TIMEOUT_MS = 25000;     // oczekiwanie na NTP
 // SNTP w rdzeniu wysyła pierwsze zapytanie z losowym opóźnieniem do 5 s,
-// a zgubione ponawia dopiero po 15 s - ponawiamy sami, częściej.
+// a do kolejnego serwera przechodzi dopiero po 15 s bez odpowiedzi -
+// ponawiamy sami, częściej, za każdym razem zaczynając od innego serwera
+// (restart SNTP zawsze zaczyna od serwera nr 0).
 static constexpr uint32_t NTP_RETRY_MS = 7000;
 static constexpr uint32_t RESYNC_INTERVAL_MS = 6 * 3600000UL; // po udanej
 static constexpr uint32_t RETRY_INTERVAL_MS = 30 * 60000UL;   // po nieudanej
@@ -39,6 +44,7 @@ static uint32_t lastAttempt = 0;
 static bool lastOk = false;
 static volatile bool ntpDone = false;
 static bool booting = false; // pierwsza synchronizacja - postęp na ekranie
+static uint8_t ntpFirst = 0; // od którego serwera zaczyna bieżące zapytanie
 
 static void bootResult(const char *text, BootState st) {
   if (booting)
@@ -46,6 +52,15 @@ static void bootResult(const char *text, BootState st) {
 }
 
 static void onNtpSync(struct timeval *) { ntpDone = true; }
+
+// (Re)start SNTP z listą serwerów przesuniętą o ntpFirst.
+static void requestNtp() {
+  const char *s[NTP_SERVER_COUNT];
+  for (uint8_t i = 0; i < NTP_SERVER_COUNT; i++)
+    s[i] = NTP_SERVERS[(ntpFirst + i) % NTP_SERVER_COUNT];
+  Serial.printf("[CZAS] Zapytanie NTP: %s\n", s[0]);
+  configTzTime(TZ_INFO, s[0], s[1], s[2]);
+}
 
 static void startSync() {
   if (strlen(WIFI_SSID) == 0) {
@@ -111,14 +126,15 @@ static void step() {
       displayBootResult(buf, BootState::Ok);
       displayBootStep("Pobieranie czasu (NTP)");
     }
-    configTzTime(TZ_INFO, NTP_SERVER1, NTP_SERVER2, NTP_SERVER3);
+    requestNtp();
     ntpStart = ntpRequest = now;
     state = State::WaitNtp;
   } else if (state == State::WaitNtp && ntpDone) {
     finish(true);
   } else if (state == State::WaitNtp && now - ntpRequest > NTP_RETRY_MS) {
-    Serial.println("[CZAS] Brak odpowiedzi NTP - ponawianie zapytania");
-    configTzTime(TZ_INFO, NTP_SERVER1, NTP_SERVER2, NTP_SERVER3);
+    Serial.println("[CZAS] Brak odpowiedzi NTP - ponawianie z innym serwerem");
+    ntpFirst = (ntpFirst + 1) % NTP_SERVER_COUNT;
+    requestNtp();
     ntpRequest = now;
   }
 }
@@ -129,6 +145,9 @@ void timeSyncBegin() {
   WiFi.persistent(false);     // nie zapisuj danych sieci we flash
   WiFi.setAutoReconnect(false); // po rozłączeniu zostań na kanale ESP-NOW
   sntp_set_time_sync_notification_cb(onNtpSync);
+  // Serwer NTP podany przez DHCP routera nie może nadpisać naszej listy
+  // (bywa nieosiągalny, np. adres samego routera bez usługi NTP).
+  esp_sntp_servermode_dhcp(false);
 
   booting = true;
   startSync();
