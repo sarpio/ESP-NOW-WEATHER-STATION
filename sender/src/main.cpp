@@ -7,8 +7,8 @@
 #include <esp_wifi.h>
 #include <sys/time.h>
 
-// MAC odbiornika (płytka ESP32-S3 N16R8)
-static const uint8_t RECEIVER_MAC[6] = {0x80, 0xB5, 0x4E, 0xFA, 0xC3, 0x14};
+// MAC odbiornika (płytka CYD 4.0" ESP32-3248S040)
+static const uint8_t RECEIVER_MAC[6] = {0x4C, 0xC3, 0x82, 0xC3, 0xAE, 0xFC};
 
 // Okres wysyłek. Gdy zegar jest zsynchronizowany (czas odsyła odbiornik
 // w odpowiedzi na każdą ramkę), wysyłki są wyrównane do zegara: o pełnej

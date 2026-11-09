@@ -1,48 +1,43 @@
 #pragma once
 
-// Konfiguracja wyświetlacza 4.0" SPI: ST7796S 480x320 + dotyk XPT2046.
-// Wyświetlacz i dotyk dzielą jedną magistralę SPI (SPI2 / FSPI).
+// Konfiguracja wyświetlacza płytki CYD 4.0" – ESP32-3248S040:
+// ST7796 480x320 + dotyk rezystancyjny XPT2046. Piny zgodne z
+// ../CYD/include/cyd_config.h (sprawdzone na płytce).
 //
-//  Moduł          ESP32-S3
-//  -----------    --------
-//  VCC            3V3
-//  GND            GND
-//  CS             GPIO 10
-//  RESET          GPIO 14
-//  DC/RS          GPIO 9
-//  SDI(MOSI)      GPIO 11   (razem z T_DIN)
-//  SCK            GPIO 12   (razem z T_CLK)
-//  LED            GPIO 21   (PWM podświetlenia)
-//  SDO(MISO)      NIE PODŁĄCZAĆ - w modułach ST7796 ta linia nie przechodzi
-//                 w stan wysokiej impedancji i psuje odczyt dotyku
-//  T_CLK          GPIO 12
-//  T_CS           GPIO 4
-//  T_DIN          GPIO 11
-//  T_DO           GPIO 13
-//  T_IRQ          GPIO 5
+// Ekran i dotyk dzielą magistralę HSPI (SPI2_HOST), osobne linie CS:
 //
-// Fotorezystor (automatyczna jasność) - dzielnik napięcia na ADC1:
+//  Sygnał         GPIO
+//  -----------    ----
+//  SCLK           14   (ekran + dotyk)
+//  MOSI           13   (ekran + dotyk)
+//  MISO           12   (ekran + dotyk; pin strapping - nic z pull-upem!)
+//  TFT CS         15
+//  TFT DC          2
+//  TFT RST         -   (sprzężony z EN)
+//  Podświetlenie  27   (PWM)
+//  Dotyk CS       33
+//  Dotyk IRQ      36   (nieużywany - dotyk odpytywany)
 //
-//   3V3 ── fotorezystor ──┬── GPIO 1
-//                         └── rezystor 10 kΩ ── GND
-//
-// Więcej światła = mniejsza rezystancja fotorezystora = wyższe napięcie.
-// ADC2 nie działa przy włączonym Wi-Fi (synchronizacja NTP) - pin musi
-// należeć do ADC1 (GPIO 1-10).
+// Fotorezystor płytki na GPIO 34 (ADC1_CH6, tylko wejście). ADC2 nie
+// działa przy włączonym Wi-Fi (synchronizacja NTP) - pin musi być z ADC1.
+// Dioda RGB (4/16/17, aktywna stanem niskim) jest gaszona przy starcie.
 
 #define LGFX_USE_V1
 #include <LovyanGFX.hpp>
 
-#define PIN_TFT_SCLK 12
-#define PIN_TFT_MOSI 11
-#define PIN_TFT_MISO 13 // używany tylko przez dotyk (T_DO)
-#define PIN_TFT_CS 10
-#define PIN_TFT_DC 9
-#define PIN_TFT_RST 14
-#define PIN_TFT_BL 21
-#define PIN_TOUCH_CS 4
-#define PIN_TOUCH_IRQ -1 // 5
-#define PIN_LDR 1 // fotorezystor (ADC1_CH0)
+#define PIN_TFT_SCLK 14
+#define PIN_TFT_MOSI 13
+#define PIN_TFT_MISO 12
+#define PIN_TFT_CS 15
+#define PIN_TFT_DC 2
+#define PIN_TFT_RST -1
+#define PIN_TFT_BL 27
+#define PIN_TOUCH_CS 33
+#define PIN_TOUCH_IRQ -1 // 36
+#define PIN_LDR 34 // fotorezystor (ADC1_CH6)
+#define PIN_LED_R 4
+#define PIN_LED_G 16
+#define PIN_LED_B 17
 
 class LGFX : public lgfx::LGFX_Device {
   lgfx::Panel_ST7796 _panel;
@@ -78,7 +73,7 @@ public:
       cfg.offset_x = 0;
       cfg.offset_y = 0;
       cfg.offset_rotation = 0;
-      cfg.readable = false;  // SDO(MISO) wyświetlacza nie jest podłączone
+      cfg.readable = false;  // odczyt z ekranu niepotrzebny
       cfg.invert = false;    // odwrócone kolory -> zmień na true
       cfg.rgb_order = false; // zamienione R z B -> zmień na true
       cfg.dlen_16bit = false;
@@ -104,7 +99,7 @@ public:
       cfg.bus_shared = true;
       cfg.offset_rotation = 0;
       cfg.spi_host = SPI2_HOST;
-      cfg.freq = 1000000;
+      cfg.freq = 2500000;
       cfg.pin_sclk = PIN_TFT_SCLK;
       cfg.pin_mosi = PIN_TFT_MOSI;
       cfg.pin_miso = PIN_TFT_MISO;

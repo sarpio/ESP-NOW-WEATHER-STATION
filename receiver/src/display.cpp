@@ -82,13 +82,34 @@ static constexpr uint32_t LIGHT_READ_MS = 100;
 static constexpr uint32_t BRIGHT_STEP_MS = 30; // płynne przejście jasności
 
 static LGFX lcd;
-static LGFX_Sprite tileSpr(&lcd);
-static LGFX_Sprite headerSpr(&lcd);
-static LGFX_Sprite footerSpr(&lcd);
-static LGFX_Sprite sliderSpr(&lcd);
-static LGFX_Sprite navSpr(&lcd);
-static LGFX_Sprite infoSpr(&lcd);  // PSRAM
-static LGFX_Sprite chartSpr(&lcd); // PSRAM
+
+// Rysowanie bez migotania przez bufor w RAM. Płytka nie ma PSRAM, a cały
+// ekran w 16 bitach to 300 KB - dlatego wszystkie elementy korzystają
+// z jednego wspólnego bufora, a większe obszary (wykres, ekran informacji)
+// są rysowane pasami: funkcja rysująca jest wywoływana raz na każdy pas
+// z clipem ograniczonym do niego, a gotowy pas trafia na ekran.
+static constexpr int BAND_PIXELS = SCR_W * 61; // 58,5 KB: wykres w 4 pasach,
+                                               // kafelek (234x106) w jednym
+static uint16_t *bandBuf = nullptr;
+static LGFX_Sprite bandSpr(&lcd);
+
+// Rysuje obszar w x h w punkcie (x0, y0) ekranu. draw(s) rysuje w s we
+// współrzędnych obszaru (0,0 = lewy górny róg), jak w zwykłym sprite.
+template <class F>
+static void drawBanded(int x0, int y0, int w, int h, F &&draw) {
+  if (!bandBuf)
+    return;
+  const int rows = std::min(h, BAND_PIXELS / w);
+  for (int by = 0; by < h; by += rows) {
+    const int bh = std::min(rows, h - by);
+    // Sprite obejmuje cały obszar, ale bufor jest przesunięty tak, że wiersz
+    // by wypada na początku bandBuf; clip nie pozwala wyjść poza bieżący pas
+    bandSpr.setBuffer(bandBuf - by * w, w, h, 16);
+    bandSpr.setClipRect(0, by, w, bh);
+    draw(bandSpr);
+    lcd.pushImage(x0, y0 + by, w, bh, (const lgfx::swap565_t *)bandBuf);
+  }
+}
 
 // Kolejność = kolejność przycisków na dolnym pasku
 enum class Screen : uint8_t { Main, Temp, Hum, Press, Info, Count };
@@ -200,7 +221,7 @@ static void updateTarget() {
 }
 
 static void lightBegin() {
-  pinMode(PIN_LDR, INPUT);
+  analogReadMilliVolts(PIN_LDR); // pierwszy odczyt konfiguruje pin jako ADC
   analogSetPinAttenuation(PIN_LDR, ADC_11db); // zakres ok. 0-3,1 V
   lightMv = analogReadMilliVolts(PIN_LDR);
   lightUsedMv = (int)lightMv;
@@ -269,7 +290,7 @@ static bool isStale(const SensorData &d) {
 }
 
 static void drawHeader(const char *title, const SensorData &d) {
-  auto &s = headerSpr;
+  drawBanded(0, 0, SCR_W, HEADER_H, [&](LGFX_Sprite &s) {
   s.fillScreen(C_HEADER);
   s.setFont(&fonts::FreeSansBold12pt7b);
   s.setTextColor(C_TEXT);
@@ -294,11 +315,11 @@ static void drawHeader(const char *title, const SensorData &d) {
   s.drawString(status, SCR_W - 12, HEADER_H / 2);
   int tw = s.textWidth(status);
   s.fillCircle(SCR_W - 12 - tw - 12, HEADER_H / 2, 5, color);
-  s.pushSprite(0, 0);
+  });
 }
 
 static void drawFooter(const SensorData &d) {
-  auto &s = footerSpr;
+  drawBanded(0, FOOTER_Y, SCR_W, FOOTER_H, [&](LGFX_Sprite &s) {
   char buf[64], age[24];
   s.fillScreen(C_BG);
   s.setFont(&fonts::Font2);
@@ -314,14 +335,14 @@ static void drawFooter(const SensorData &d) {
     snprintf(buf, sizeof(buf), "Pakiety: %lu", (unsigned long)d.packets);
   s.setTextDatum(textdatum_t::middle_right);
   s.drawString(buf, SCR_W - 8, FOOTER_H / 2);
-  s.pushSprite(0, FOOTER_Y);
+  });
 }
 
 // Kafelek z pojedynczym pomiarem. barPct < 0 - bez paska.
 static void drawTile(int col, int row, const char *label, uint16_t accent,
                      const char *value, const char *unit, bool degree,
                      const char *sub, int barPct, bool stale) {
-  auto &s = tileSpr;
+  drawBanded(TILE_X[col], TILE_Y[row], TILE_W, TILE_H, [&](LGFX_Sprite &s) {
   s.fillScreen(C_BG);
   s.fillRoundRect(0, 0, TILE_W, TILE_H, 10, C_TILE);
   s.fillRoundRect(14, 14, 4, 18, 2, accent);
@@ -368,7 +389,7 @@ static void drawTile(int col, int row, const char *label, uint16_t accent,
       s.fillRoundRect(bx + 2, by + 2, fw, bh - 4, 2, c);
   }
 
-  s.pushSprite(TILE_X[col], TILE_Y[row]);
+  });
 }
 
 static void drawMainTiles(const SensorData &d) {
@@ -434,9 +455,8 @@ static void updateBatteryTrend() {
   batTrendValid = true;
 }
 
-static void drawInfoRow(int row, const char *label, const char *value,
-                        uint16_t valueColor = C_TEXT) {
-  auto &s = infoSpr;
+static void drawInfoRow(LGFX_Sprite &s, int row, const char *label,
+                        const char *value, uint16_t valueColor = C_TEXT) {
   const int y = INFO_ROW0 + row * INFO_ROW_H;
   s.setFont(&fonts::FreeSans9pt7b);
   s.setTextDatum(textdatum_t::middle_left);
@@ -447,7 +467,7 @@ static void drawInfoRow(int row, const char *label, const char *value,
 }
 
 static void drawInfo(const SensorData &d) {
-  auto &s = infoSpr;
+  drawBanded(0, HEADER_H, SCR_W, INFO_H, [&](LGFX_Sprite &s) {
   char buf[48];
   s.fillScreen(C_BG);
   bool stale = isStale(d);
@@ -458,7 +478,7 @@ static void drawInfo(const SensorData &d) {
     uint16_t c = stale ? C_LABEL
                        : (pct > 50 ? C_GREEN : (pct > 20 ? C_YELLOW : C_RED));
     snprintf(buf, sizeof(buf), "%d %%", d.bat);
-    drawInfoRow(0, "Bateria nadajnika", buf, c);
+    drawInfoRow(s, 0, "Bateria nadajnika", buf, c);
     const int bw = 90, bh = 14, bx = 330, by = INFO_ROW0 - bh / 2;
     s.drawRoundRect(bx, by, bw, bh, 4, C_LABEL);
     s.fillRect(bx + bw, by + 4, 3, bh - 8, C_LABEL);
@@ -470,42 +490,41 @@ static void drawInfo(const SensorData &d) {
     if (batTrendValid)
       snprintf(buf + len, sizeof(buf) - len, "   (%+.2f V / %lu h)",
                batTrendMv / 1000.0f, (unsigned long)((batTrendSpan + 1800) / 3600));
-    drawInfoRow(1, "Napiecie baterii", buf);
+    drawInfoRow(s, 1, "Napiecie baterii", buf);
   } else {
-    drawInfoRow(0, "Bateria nadajnika", "---");
-    drawInfoRow(1, "Napiecie baterii", "---");
+    drawInfoRow(s, 0, "Bateria nadajnika", "---");
+    drawInfoRow(s, 1, "Napiecie baterii", "---");
   }
   char age[24];
-  drawInfoRow(2, "Ostatni odczyt", formatAge(age, sizeof(age), d),
+  drawInfoRow(s, 2, "Ostatni odczyt", formatAge(age, sizeof(age), d),
               stale ? C_RED : C_TEXT);
 
   snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X", ownMac[0],
            ownMac[1], ownMac[2], ownMac[3], ownMac[4], ownMac[5]);
-  drawInfoRow(3, "MAC odbiornika", buf);
+  drawInfoRow(s, 3, "MAC odbiornika", buf);
   snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X  (kanal %d)",
            SENDER_MAC[0], SENDER_MAC[1], SENDER_MAC[2], SENDER_MAC[3],
            SENDER_MAC[4], SENDER_MAC[5], ESPNOW_CHANNEL);
-  drawInfoRow(4, "MAC nadajnika", buf);
+  drawInfoRow(s, 4, "MAC nadajnika", buf);
   snprintf(buf, sizeof(buf), "%d mV  (korekta %+d%%)", (int)lightMv,
            lightCorrection((int)lightMv) * 100 / 255);
-  drawInfoRow(5, "Czujnik swiatla", buf);
+  drawInfoRow(s, 5, "Czujnik swiatla", buf);
   snprintf(buf, sizeof(buf), "%lu", (unsigned long)d.packets);
-  drawInfoRow(6, "Odebrane pakiety", buf);
+  drawInfoRow(s, 6, "Odebrane pakiety", buf);
   if (d.hasRssi)
     snprintf(buf, sizeof(buf), "%d dBm", d.rssi);
   else
     strcpy(buf, "---");
-  drawInfoRow(7, "Ostatni RSSI", buf);
+  drawInfoRow(s, 7, "Ostatni RSSI", buf);
   uint32_t up = millis() / 1000;
   snprintf(buf, sizeof(buf), "%lu d %02lu:%02lu:%02lu",
            (unsigned long)(up / 86400), (unsigned long)(up / 3600 % 24),
            (unsigned long)(up / 60 % 60), (unsigned long)(up % 60));
-  drawInfoRow(8, "Czas pracy", buf);
+  drawInfoRow(s, 8, "Czas pracy", buf);
   snprintf(buf, sizeof(buf), "%lu kB",
            (unsigned long)(ESP.getFreeHeap() / 1024));
-  drawInfoRow(9, "Wolna pamiec", buf);
-
-  s.pushSprite(0, HEADER_H);
+  drawInfoRow(s, 9, "Wolna pamiec", buf);
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -629,8 +648,7 @@ static void curveSlopes(const float *x, const float *y, int n, float *m) {
 }
 
 // Napis wyśrodkowany w obszarze wykresu
-static void chartMessage(const char *line1, const char *line2) {
-  auto &s = chartSpr;
+static void chartMessage(LGFX_Sprite &s, const char *line1, const char *line2) {
   s.setFont(&fonts::FreeSans9pt7b);
   s.setTextDatum(textdatum_t::middle_center);
   s.setTextColor(C_LABEL);
@@ -639,18 +657,16 @@ static void chartMessage(const char *line1, const char *line2) {
     s.drawString(line2, (PLOT_L + PLOT_R) / 2, (PLOT_T + PLOT_B) / 2 + 12);
 }
 
-static void drawChart(const MetricInfo &m) {
-  auto &s = chartSpr;
+// Rysuje wykres z n punktów wczytanych już do chartPts/chartFit. Wywoływane
+// raz na każdy pas ekranu (drawBanded), więc bez wczytywania danych.
+static void renderChart(LGFX_Sprite &s, const MetricInfo &m, uint32_t start,
+                        int n) {
   s.fillScreen(C_BG);
-  const time_t now = timeNow();
-  chartEnd = chartEndFor(now);
   if (!chartEnd) {
-    chartMessage("Zegar niezsynchronizowany", "wykres dostepny po synchronizacji NTP");
-    s.pushSprite(0, HEADER_H);
+    chartMessage(s, "Zegar niezsynchronizowany",
+                 "wykres dostepny po synchronizacji NTP");
     return;
   }
-  const uint32_t start = chartEnd - CHART_SPAN_S;
-  const int n = loadChartPoints(m, start, chartEnd);
 
   // Jednostka nad osią Y
   s.setFont(&fonts::FreeSans9pt7b);
@@ -667,7 +683,6 @@ static void drawChart(const MetricInfo &m) {
   int lo = 0, hi = 0;
   float vmin = 0, vmax = 0;
   if (n) {
-    smoothChart(n, m.smoothS);
     vmin = vmax = chartPts[0].v;
     float fmin = chartFit[0], fmax = chartFit[0];
     for (int i = 1; i < n; i++) {
@@ -755,8 +770,7 @@ static void drawChart(const MetricInfo &m) {
   s.drawFastVLine(PLOT_L, PLOT_T, PLOT_B - PLOT_T + 1, C_LABEL);
 
   if (!n) {
-    chartMessage("Brak odczytow z ostatnich 24 h", nullptr);
-    s.pushSprite(0, HEADER_H);
+    chartMessage(s, "Brak odczytow z ostatnich 24 h", nullptr);
     return;
   }
 
@@ -806,15 +820,26 @@ static void drawChart(const MetricInfo &m) {
   const int lx = lroundf(px[n - 1]), ly = lroundf(py[n - 1]);
   s.fillCircle(lx, ly, 4, colorAt(py[n - 1]));
   s.drawCircle(lx, ly, 4, C_TEXT);
+}
 
-  s.pushSprite(0, HEADER_H);
+static void drawChart(const MetricInfo &m) {
+  chartEnd = chartEndFor(timeNow());
+  const uint32_t start = chartEnd - CHART_SPAN_S;
+  int n = 0;
+  if (chartEnd) {
+    n = loadChartPoints(m, start, chartEnd);
+    if (n)
+      smoothChart(n, m.smoothS);
+  }
+  drawBanded(0, HEADER_H, SCR_W, CHART_H,
+             [&](LGFX_Sprite &s) { renderChart(s, m, start, n); });
 }
 
 // ---------------------------------------------------------------------------
 // Dolny pasek przycisków
 
 static void drawNav() {
-  auto &s = navSpr;
+  drawBanded(0, NAV_Y, SCR_W, NAV_H, [&](LGFX_Sprite &s) {
   const int bw = SCR_W / SCREEN_COUNT;
   s.fillScreen(C_BG);
   s.setFont(&fonts::FreeSans9pt7b);
@@ -828,7 +853,7 @@ static void drawNav() {
     s.setTextColor(active ? C_TEXT : C_LABEL);
     s.drawString(NAV_LABELS[i], x + w / 2, NAV_H / 2 + 2);
   }
-  s.pushSprite(0, NAV_Y);
+  });
 }
 
 // Przycisk paska pod punktem dotyku lub -1. Pasek łapie też kilka pikseli
@@ -856,7 +881,7 @@ static uint8_t sliderXToLevel(int32_t x) {
 }
 
 static void drawSlider() {
-  auto &s = sliderSpr;
+  drawBanded(0, SLIDER_Y, SCR_W, SLIDER_H, [&](LGFX_Sprite &s) {
   const int cy = SLIDER_H / 2;
   s.fillScreen(C_BG);
 
@@ -892,8 +917,7 @@ static void drawSlider() {
   s.setTextColor(autoBright ? C_BG : C_LABEL);
   s.setTextDatum(textdatum_t::middle_center);
   s.drawString("Auto", AUTO_X + AUTO_W / 2, cy + 1);
-
-  s.pushSprite(0, SLIDER_Y);
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -950,6 +974,11 @@ void displayBootResult(const char *result, BootState state) {
 
 void displayBegin(const uint8_t mac[6]) {
   memcpy(ownMac, mac, 6);
+  // Dioda RGB płytki (aktywna stanem niskim) - wyłączona
+  for (int pin : {PIN_LED_R, PIN_LED_G, PIN_LED_B}) {
+    pinMode(pin, OUTPUT);
+    digitalWrite(pin, HIGH);
+  }
   lcd.init();
   // T_IRQ (PENIRQ) w XPT2046 to wyjście open-drain, a moduł nie ma podciągnięcia.
   // LovyanGFX ustawia pin jako zwykłe wejście - bez pull-up pin "pływa"
@@ -961,24 +990,10 @@ void displayBegin(const uint8_t mac[6]) {
   lightBegin();
   lcd.setBrightness(brightness);
 
-  tileSpr.setColorDepth(16);
-  tileSpr.createSprite(TILE_W, TILE_H);
-  headerSpr.setColorDepth(16);
-  headerSpr.createSprite(SCR_W, HEADER_H);
-  footerSpr.setColorDepth(16);
-  footerSpr.createSprite(SCR_W, FOOTER_H);
-  sliderSpr.setColorDepth(16);
-  sliderSpr.createSprite(SCR_W, SLIDER_H);
-  navSpr.setColorDepth(16);
-  navSpr.createSprite(SCR_W, NAV_H);
-  // Duże sprite'y (ok. 200 i 230 KB) w PSRAM
-  infoSpr.setColorDepth(16);
-  infoSpr.setPsram(true);
-  chartSpr.setColorDepth(16);
-  chartSpr.setPsram(true);
-  if (!infoSpr.createSprite(SCR_W, INFO_H) ||
-      !chartSpr.createSprite(SCR_W, CHART_H))
-    Serial.println("[EKRAN] Brak pamieci na sprite'y ekranu info/wykresu");
+  bandBuf = (uint16_t *)heap_caps_malloc(BAND_PIXELS * sizeof(uint16_t),
+                                         MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  if (!bandBuf)
+    Serial.println("[EKRAN] Brak pamieci na bufor ekranu");
 
   initTouch();
   drawBootScreen();

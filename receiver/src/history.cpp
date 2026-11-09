@@ -160,7 +160,8 @@ bool historyBegin() {
   }
 
   if (!valid || hdr.capacity != HISTORY_SIZE) {
-    // Bufor tymczasowy na wpisy przenoszone do nowego pliku (PSRAM, jeśli jest)
+    // Bufor tymczasowy na wpisy przenoszone do nowego pliku (ok. 48 KB;
+    // PSRAM, jeśli płytka go ma)
     size_t maxN = valid ? max<size_t>(hdr.count, HISTORY_SIZE) : HISTORY_SIZE;
     HistoryEntry *buf = (HistoryEntry *)ps_malloc(maxN * sizeof(HistoryEntry));
     if (!buf)
@@ -193,9 +194,8 @@ bool historyBegin() {
   Serial.printf("[HIST] LittleFS: zajete %u z %u KB\n",
                 (unsigned)(LittleFS.usedBytes() / 1024),
                 (unsigned)(LittleFS.totalBytes() / 1024));
-  // Bez podłączonego terminala nie ma sensu wysyłać ~3000 wierszy
-  if (Serial)
-    historyPrint();
+  // Bez automatycznego wypisywania przy starcie: port UART nie wie, czy
+  // terminal jest otwarty, a ~3000 wierszy blokowałoby start na ok. 10 s.
   Serial.println("[HIST] Wpisz 'h' w monitorze portu, aby wypisac historie");
   return true;
 }

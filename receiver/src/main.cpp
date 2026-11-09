@@ -142,10 +142,6 @@ static void restoreLastReading() {
 
 void setup() {
   Serial.begin(115200);
-  // Port USB podłączony do komputera, ale bez otwartego monitora: każdy
-  // zapis czekałby domyślnie 100 ms na odbiór i start trwałby ponad minutę.
-  // Z zerowym limitem nieodebrany tekst jest od razu pomijany.
-  Serial.setTxTimeoutMs(0);
   delay(1000);
 
   WiFi.mode(WIFI_STA);

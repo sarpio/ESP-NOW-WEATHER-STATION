@@ -1,7 +1,8 @@
 # Stacja pogodowa – odbiornik ESP-NOW
 
-Odbiornik danych pogodowych oparty na **ESP32-S3** z dotykowym wyświetlaczem
-**4.0" SPI TFT (ST7796S, 480×320) z kontrolerem dotyku XPT2046**.
+Odbiornik danych pogodowych na płytce **CYD 4.0" (ESP32-3248S040)** – ESP32
+ze zintegrowanym wyświetlaczem **4.0" SPI TFT (ST7796, 480×320) z kontrolerem
+dotyku XPT2046**. Opis i test samej płytki: projekt [`../CYD`](../CYD/README.md).
 Urządzenie odbiera przez ESP-NOW pakiety JSON wysyłane przez nadajnik
 (płytka XIAO ESP32S3, projekt `../sender`) i pokazuje je na ekranie.
 
@@ -55,88 +56,63 @@ Urządzenie odbiera przez ESP-NOW pakiety JSON wysyłane przez nadajnik
 
 | Element      | Opis                                                        |
 |--------------|-------------------------------------------------------------|
-| MCU          | ESP32-S3 N16R8 (16 MB flash QIO, 8 MB PSRAM OPI), DevKitC-1 |
-| Wyświetlacz  | 4.0" SPI TFT, sterownik ST7796S, 480×320                    |
+| Płytka       | CYD 4.0" – ESP32-3248S040 (wersja z dotykiem rezystancyjnym) |
+| MCU          | ESP32-D0WD-V3, 240 MHz, 4 MB flash, **bez PSRAM**            |
+| Wyświetlacz  | 4.0" TFT IPS, sterownik ST7796, 480×320                     |
 | Dotyk        | Rezystancyjny, kontroler XPT2046                            |
-| Zasilanie    | USB (natywny port USB-Serial/JTAG ESP32-S3)                 |
+| Zasilanie    | USB (mostek USB-UART, `/dev/ttyUSB0`)                       |
 
-## Połączenia ESP32-S3 ↔ TFT
+Wszystko jest połączone na płytce – nie trzeba nic lutować. Piny są
+zgodne z [`../CYD/include/cyd_config.h`](../CYD/include/cyd_config.h)
+i ustawione w `src/lgfx_config.h`.
 
-Wyświetlacz i kontroler dotyku dzielą jedną magistralę SPI (**SPI2 / FSPI**).
+## Piny płytki
 
-### Wyświetlacz (ST7796S)
+Wyświetlacz i kontroler dotyku dzielą magistralę **HSPI (SPI2_HOST)**,
+każdy ma własny CS.
 
-| Pin modułu TFT | ESP32-S3   | Uwagi                                         |
-|----------------|------------|-----------------------------------------------|
-| VCC            | 3V3        |                                               |
-| GND            | GND        |                                               |
-| DC/RS          | GPIO 9     | Data / Command                                |
-| CS             | GPIO 10    | Chip select wyświetlacza                      |
-| SDI (MOSI)     | GPIO 11    | Wspólne z T_DIN                               |
-| SCK            | GPIO 12    | Wspólne z T_CLK                               |
-| RESET          | GPIO 14    |                                               |
-| LED            | GPIO 21    | Podświetlenie – PWM (kanał 7, 12 kHz)         |
-| SDO (MISO)     | **nie podłączać** | Patrz uwaga poniżej                    |
-
-### Dotyk (XPT2046)
-
-| Pin modułu TFT | ESP32-S3   | Uwagi                                         |
-|----------------|------------|-----------------------------------------------|
-| T_IRQ          | GPIO 5     | Opcjonalne – obecnie wyłączone w kodzie (`PIN_TOUCH_IRQ = -1`) |
-| T_DO           | GPIO 13    | MISO magistrali – używane tylko przez dotyk   |
-| T_DIN          | GPIO 11    | Wspólne z SDI (MOSI)                          |
-| T_CS           | GPIO 4     | Chip select dotyku                            |
-| T_CLK          | GPIO 12    | Wspólne z SCK                                 |
+| Sygnał           | GPIO | Uwagi                                                   |
+|------------------|------|---------------------------------------------------------|
+| SCLK             | 14   | ekran + dotyk                                           |
+| MOSI             | 13   | ekran + dotyk                                           |
+| MISO             | 12   | ekran + dotyk; pin strapping – nic z pull-upem          |
+| CS ekranu        | 15   |                                                         |
+| DC ekranu        | 2    |                                                         |
+| RESET ekranu     | –    | sprzężony z EN (reset ESP32)                            |
+| Podświetlenie    | 27   | PWM (kanał 7, 12 kHz)                                   |
+| CS dotyku        | 33   | 2,5 MHz                                                 |
+| IRQ dotyku       | 36   | nieużywany (`PIN_TOUCH_IRQ = -1`), dotyk odpytywany     |
+| Fotorezystor     | 34   | ADC1_CH6, tylko wejście                                 |
+| Dioda RGB        | 4/16/17 | R/G/B, aktywna stanem niskim – gaszona przy starcie  |
 
 ### Fotorezystor
 
-Dzielnik napięcia podłączony do **GPIO 1** (ADC1 – ADC2 nie działa przy
-włączonym Wi-Fi):
+Płytka ma fotorezystor na **GPIO 34** (ADC1 – ADC2 nie działa przy
+włączonym Wi-Fi). Pin nie został jeszcze sprawdzony na tej płytce (patrz
+README projektu CYD), a progi `LIGHT_DARK_MV`/`LIGHT_BRIGHT_MV`
+(300–2600 mV) dobrano dla dawnego dzielnika GL5528 + 10 kΩ, więc na CYD
+mogą wymagać korekty.
 
-```
- 3V3 ── fotorezystor (np. GL5528) ──┬── GPIO 1
-                                    └── rezystor 10 kΩ ── GND
-```
-
-Więcej światła = wyższe napięcie = jaśniejszy ekran. W trybie *Auto* do
-poziomu bazowego z suwaka dodawana jest korekta: przy napięciu w połowie
-zakresu `LIGHT_DARK_MV`..`LIGHT_BRIGHT_MV` (300–2600 mV) zerowa, przy
+W trybie *Auto* do poziomu bazowego z suwaka dodawana jest korekta: przy
+napięciu w połowie zakresu `LIGHT_DARK_MV`..`LIGHT_BRIGHT_MV` zerowa, przy
 `LIGHT_DARK_MV` i poniżej ok. −48 %, przy `LIGHT_BRIGHT_MV` i powyżej
-ok. +48 % (`AUTO_SWING`). Stałe są w `src/display.cpp`; bieżące napięcie
-i korektę pokazuje wiersz *Czujnik światła* na ekranie informacji.
+ok. +48 % (`AUTO_SWING`). Kod zakłada, że więcej światła daje wyższe
+napięcie; jeśli na tej płytce jest odwrotnie, auto-jasność zadziała
+w drugą stronę. Stałe są w `src/display.cpp`; bieżące napięcie i korektę
+pokazuje wiersz *Czujnik światła* na ekranie informacji.
 
-### Schemat zbiorczy
+### Pamięć RAM (brak PSRAM)
 
-```
- ESP32-S3                     Moduł TFT 4.0" (ST7796S + XPT2046)
- ────────                     ──────────────────────────────────
- 3V3      ──────────────────  VCC
- GND      ──────────────────  GND
- GPIO 4   ──────────────────  T_CS
- GPIO 5   ─ ─ ─ ─ ─ ─ ─ ─ ─   T_IRQ   (opcjonalnie)
- GPIO 9   ──────────────────  DC/RS
- GPIO 10  ──────────────────  CS
- GPIO 11  ────────┬─────────  SDI (MOSI)
-                  └─────────  T_DIN
- GPIO 12  ────────┬─────────  SCK
-                  └─────────  T_CLK
- GPIO 13  ──────────────────  T_DO
- GPIO 14  ──────────────────  RESET
- GPIO 21  ──────────────────  LED
-          (niepodłączone)     SDO (MISO)
-```
+Cały ekran w 16 bitach to 300 KB, a ESP32 ma ok. 320 KB SRAM. Dlatego
+wszystkie elementy ekranu korzystają z jednego bufora 58,5 KB
+(`BAND_PIXELS` w `src/display.cpp`): mniejsze (nagłówek, kafelek, pasek
+przycisków) mieszczą się w nim w całości, a wykres i ekran informacji są
+rysowane pasami (`drawBanded()`), bez migotania.
 
-### Uwagi do połączeń
+### Uwagi
 
-- **SDO (MISO) wyświetlacza zostaw niepodłączone.** W modułach ST7796 ta linia
-  nie przechodzi w stan wysokiej impedancji i zakłóca odczyt dotyku
-  na wspólnej magistrali. Dlatego w konfiguracji panelu jest
-  `readable = false`.
-- **T_IRQ** to wyjście open-drain bez podciągnięcia na module. Jeśli zostanie
-  włączone (`PIN_TOUCH_IRQ 5` w `src/lgfx_config.h`), kod ustawia na nim
-  wewnętrzny pull-up.
-- Zegar zapisu SPI to 40 MHz. Przy zakłóceniach (długie przewody, artefakty
-  na obrazie) obniż `freq_write` do 27 MHz w `src/lgfx_config.h`.
+- Zegar zapisu SPI to 40 MHz. Przy artefaktach na obrazie obniż
+  `freq_write` do 27 MHz w `src/lgfx_config.h`.
 - Kolory odwrócone → `cfg.invert = true`; zamienione R z B →
   `cfg.rgb_order = true`; obraz obrócony o 180° → `lcd.setRotation(3)`
   w `src/display.cpp`.
@@ -144,7 +120,8 @@ i korektę pokazuje wiersz *Czujnik światła* na ekranie informacji.
 ## Historia odczytów
 
 Każdy odebrany pakiet zapisywany jest w pamięci flash ESP – w pliku
-`/history.bin` na systemie plików LittleFS (partycja `spiffs`, 3,4 MB).
+`/history.bin` na systemie plików LittleFS (partycja `spiffs` ok. 900 KB,
+tabela partycji `huge_app.csv`).
 Plik jest buforem cyklicznym na **2976 odczytów (31 dni × 96)** – gdy jest
 pełny, nowy odczyt nadpisuje najstarszy. Jeden odczyt zajmuje 16 B, cały
 plik ok. 47 KB. Historia przetrwa restart, odłączenie zasilania i wgranie
@@ -153,9 +130,9 @@ nowego programu (`upload` nie nadpisuje partycji `spiffs`; robi to tylko
 
 Odczyt historii przez port szeregowy (115200 baud, `pio device monitor`):
 
-- przy starcie – cała historia wypisywana jest automatycznie, jeśli monitor
-  portu jest otwarty,
-- w dowolnej chwili – wpisz `h` w monitorze portu.
+- wpisz `h` w monitorze portu – wypisana zostanie cała historia (CSV).
+  Przy starcie historia nie jest wypisywana automatycznie: port UART nie
+  wie, czy terminal jest otwarty, a ok. 3000 wierszy blokowałoby start.
 
 ```
 time,boot,uptime_s,temperature_c,humidity_pct,pressure_hpa,battery_pct,battery_v,rssi_dbm
@@ -261,9 +238,12 @@ automatycznie): `ArduinoJson ^7.2.0`, `LovyanGFX ^1.2.7`.
 ```bash
 cp src/wifi_secrets.example.h src/wifi_secrets.h   # raz, potem wpisz SSID i hasło
 pio run                  # kompilacja
-pio run -t upload        # wgranie
+pio run -t upload        # wgranie (port /dev/ttyUSB0 ustawiony w platformio.ini)
 pio device monitor       # monitor portu szeregowego (115200 bd)
 ```
+
+Linux: jeśli wgrywanie zgłasza brak dostępu do `/dev/ttyUSB0`, dodaj
+użytkownika do grupy `dialout` (`sudo usermod -aG dialout $USER`).
 
 ## Obsługa
 

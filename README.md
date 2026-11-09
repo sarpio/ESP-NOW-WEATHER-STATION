@@ -7,15 +7,15 @@ przez **ESP-NOW** (bez routera i sieci Wi-Fi):
   z czujnikami SHT41 (temperatura, wilgotność) i LPS22HH (ciśnienie). O pełnej
   godzinie oraz +15, +30 i +45 min mierzy dane i napięcie baterii, wysyła je
   i przechodzi w deep sleep. Zegar synchronizuje z odbiornikiem przy każdej wysyłce.
-- **Odbiornik** (`receiver/`) – **ESP32-S3 N16R8** z dotykowym wyświetlaczem
-  4.0" TFT (ST7796S + XPT2046). Odbiera pakiety i prezentuje odczyty na ekranie.
+- **Odbiornik** (`receiver/`) – płytka **CYD 4.0" (ESP32-3248S040)**: ESP32
+  ze zintegrowanym dotykowym wyświetlaczem 4.0" TFT (ST7796 + XPT2046). Odbiera pakiety i prezentuje odczyty na ekranie.
   W odpowiedzi na każdy pakiet odsyła nadajnikowi czas (zegar odbiornika jest
   synchronizowany z serwerem NTP przez Wi-Fi).
 
 ```
 ┌───────────────────────┐        ESP-NOW         ┌────────────────────────┐
 │  Nadajnik             │   (kanał Wi-Fi 1,      │  Odbiornik             │
-│  XIAO ESP32S3         │    JSON ≤ 250 B)       │  ESP32-S3 N16R8        │
+│  XIAO ESP32S3         │    JSON ≤ 250 B)       │  CYD ESP32-3248S040    │
 │  SHT41 + LPS22HH      │ ─────────────────────► │  TFT 4.0" 480×320      │
 │  bateria Li-Po        │  :00 :15 :30 :45       │  dotyk XPT2046         │
 │                       │ ◄───────────────────── │  zegar z NTP           │
@@ -30,7 +30,8 @@ ESP-NOW/
 ├── common/
 │   └── packet.h     # wspólne: format ramek (dane, czas), kanał ESP-NOW, MAC nadajnika, klucze JSON, strefa czasowa
 ├── sender/          # projekt PlatformIO nadajnika     → sender/README.md
-└── receiver/        # projekt PlatformIO odbiornika    → receiver/README.md
+├── receiver/        # projekt PlatformIO odbiornika    → receiver/README.md
+└── CYD/             # program testowy płytki odbiornika → CYD/README.md
 ```
 
 Oba projekty dołączają katalog `common/` przez `build_flags = -I../common`.
@@ -92,7 +93,7 @@ pio device monitor       # monitor portu szeregowego (115200 bd)
 | Projekt    | Środowisko     | Platforma                                  | Biblioteki                       |
 |------------|----------------|--------------------------------------------|----------------------------------|
 | `sender`   | `xiao-esp32s3` | pioarduino (Arduino core 3.x)              | ArduinoJson ^7.2.0               |
-| `receiver` | `esp32-s3`     | espressif32                                | ArduinoJson ^7.2.0, LovyanGFX ^1.2.7 |
+| `receiver` | `cyd`          | espressif32 (`esp32dev`, `/dev/ttyUSB0`)   | ArduinoJson ^7.2.0, LovyanGFX ^1.2.7 |
 
 > Nadajnik w deep sleep nie jest widoczny jako port USB – przed wgraniem
 > naciśnij RESET (płytka czuwa wtedy 5 min) lub załóż zworkę D3 ↔ 3V3.
